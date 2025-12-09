@@ -1,4 +1,5 @@
 # Lab 1a: HPA Autoscaling
+<img width="1536" height="1024" alt="ZIMAGE" src="https://github.com/user-attachments/assets/05a160e7-e2e0-4c22-afcc-25845a169302" />
 
 ## Objective
 Deploy a CPU-intensive workload and observe HPA-driven pod autoscaling.
