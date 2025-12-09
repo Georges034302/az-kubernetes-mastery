@@ -1,5 +1,4 @@
 # Lab 1b: Create a User Node Pool for Batch Workloads
-<img width="1536" height="1024" alt="ZIMAGE" src="https://github.com/user-attachments/assets/0d9d5fb4-d407-4c39-955c-4b82c225a04f" />
 
 ## Objective
 Create a dedicated AKS user node pool for batch workloads using labels, taints, and tolerations, then validate workload placement through Jobs, DaemonSets, and node affinity.
@@ -85,9 +84,6 @@ kubectl get nodes
 ---
 
 ## 3. Create User Node Pool
----
-
-## 3. Create User Node Pool
 
 ```bash
 # Create dedicated node pool for batch workloads
@@ -153,9 +149,6 @@ echo "Batch pool nodes: $BATCH_NODES"
 ---
 
 ## 5. Deploy Workload WITHOUT Tolerations (Expected: Fails)
----
-
-## 5. Deploy Workload WITHOUT Tolerations (Expected: Fails)
 
 Create `batch-job-no-toleration.yaml`:
 
@@ -206,9 +199,6 @@ kubectl describe pod $FAILED_POD | grep -A 10 Events
 
 **Expected:** Pod stays in `Pending` state because it has `nodeSelector` for batch nodes but lacks the required toleration for the `workload=batch:NoSchedule` taint.
 
----
-
-## 6. Deploy Workload WITH Tolerations (Expected: Succeeds)
 ---
 
 ## 6. Deploy Workload WITH Tolerations (Expected: Succeeds)
@@ -295,9 +285,6 @@ kubectl logs -l app=batch-processor --tail=10 | head -20
 ---
 
 ## 7. Deploy DaemonSet on Batch Nodes
----
-
-## 7. Deploy DaemonSet on Batch Nodes
 
 Create `batch-monitoring-daemonset.yaml`:
 
@@ -369,49 +356,6 @@ echo "DaemonSet pods running: $DS_POD_COUNT (should equal $NODE_COUNT)"
 echo ""
 echo "=== Sample Monitor Logs ==="
 kubectl logs -l app=node-monitor --tail=5 | head -10
-```
-
----
-
-## 8. Advanced Scheduling: Node Affinity
-Create `advanced-scheduling.yaml`:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: batch-workload
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: batch-app
-  template:
-    metadata:
-      labels:
-        app: batch-app
-    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: workload
-                operator: In
-                values:
-                - batch
-      tolerations:
-      - key: workload
-        operator: Equal
-        value: batch
-        effect: NoSchedule
-      containers:
-      - name: app
-        image: nginx:alpine
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
 ```
 
 ---
@@ -496,6 +440,43 @@ echo "Ready replicas: $READY_REPLICAS/2"
 ✅ Pods with tolerations schedule correctly to the batch node pool  
 ✅ DaemonSet runs one pod per batch node  
 ✅ Node affinity ensures workloads run only on batch nodes  
+
+---
+
+## 📘 How This Lab Connects to Cluster Autoscaler (Next Lab)
+
+This lab demonstrates **node pool-level isolation and scheduling controls**, which are essential for understanding how Cluster Autoscaler operates in multi-pool scenarios.
+
+### Key Connections:
+
+**1. Per-Pool Autoscaling**  
+- Each node pool has its own autoscaler configuration (`--min-count`, `--max-count`)
+- The batch pool created in this lab can scale **independently** from the system pool
+- Next lab will show how autoscaler responds when workloads exceed current node capacity
+
+**2. Resource-Based Scaling Triggers**  
+- When batch jobs request more resources than available on existing nodes, Cluster Autoscaler detects **unschedulable pods**
+- Autoscaler will add nodes **to the specific pool** where workloads are constrained by tolerations/affinity
+- This lab's taints ensure batch workloads only trigger scaling of the batch pool (not system pool)
+
+**3. Workload Placement + Autoscaling Together**  
+- **HPA** (Lab 1a) scales **pod replicas** based on metrics
+- **Node pools + taints** (this lab) control **where** pods can run
+- **Cluster Autoscaler** (next lab) adds/removes **nodes** when pod demands change
+
+**Flow Example:**
+1. Batch job scaled by HPA needs 10 pods
+2. Pods have `workload=batch` toleration → can only schedule on batch pool nodes
+3. Batch pool currently has 2 nodes → only 4 pods fit
+4. 6 pods remain `Pending` → Cluster Autoscaler adds nodes to batch pool (up to `MAX_COUNT=5`)
+5. All 10 pods now running on batch nodes
+
+### Why Node Pool Isolation Matters for Autoscaling:
+- Prevents batch workloads from consuming system pool resources (which are reserved for cluster operations)
+- Enables **cost optimization** by scaling batch nodes independently (e.g., spot instances for batch, regular VMs for critical workloads)
+- Allows different **VM sizes** per workload type (GPU nodes for ML, CPU-optimized for batch, memory-optimized for databases)
+
+**Next lab** will demonstrate the autoscaler in action by creating scenarios where pod demand triggers automatic node additions and removals.
 
 ---
 
