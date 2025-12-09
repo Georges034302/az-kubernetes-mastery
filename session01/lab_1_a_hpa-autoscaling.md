@@ -107,7 +107,6 @@ if [ -z "$METRICS_SERVER_STATUS" ] || [ "$METRICS_SERVER_STATUS" == "0" ]; then
   az aks update \
     --resource-group $RESOURCE_GROUP \
     --name $CLUSTER_NAME \
-    --enable-managed-identity \
     --enable-metrics-server
   
   echo "Waiting for metrics server to be ready..."
@@ -286,45 +285,83 @@ kubectl describe hpa $HPA_NAME
 
 ## 6. Generate Load
 
-**Option A - Interactive load generator:**
+**Option A - Increase CPU stress directly (Simple):**
 ```bash
-# Run a temporary pod to generate traffic
-kubectl run load-generator \
-  --image=busybox \
-  --restart=Never \
-  --rm \
-  -it \
-  -- /bin/sh -c "while true; do wget -q -O- http://$APP_NAME.$APP_NAMESPACE.svc.cluster.local; done"
+# Increase the number of replicas to trigger higher CPU usage
+# This will cause existing pods to consume more CPU
+echo "Scaling deployment to trigger CPU load..."
+kubectl scale deployment $APP_NAME --replicas=3
+
+# Wait for pods to start
+sleep 10
+
+# Verify all pods are consuming CPU
+kubectl top pods -l app=$APP_NAME
 ```
 
-**Option B - Background load generator (Recommended for monitoring):**
+**Option B - Run additional CPU stress pod (Recommended):**
 ```bash
-# Load generator configuration
-LOAD_GEN_NAME="load-generator"
+# Create a second CPU-intensive deployment to increase cluster load
+LOAD_GEN_NAME="cpu-stress-load"
 
-echo "Starting load generator: $LOAD_GEN_NAME"
+echo "Creating additional CPU load generator: $LOAD_GEN_NAME"
 
-# Create a deployment that generates continuous load
-LOAD_GEN_RESULT=$(kubectl run $LOAD_GEN_NAME \
-  --image=busybox \
-  --restart=Always \
-  -- /bin/sh -c "while true; do wget -q -O- http://$APP_NAME.$APP_NAMESPACE.svc.cluster.local; done")
+# Deploy another CPU stress instance
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $LOAD_GEN_NAME
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: $LOAD_GEN_NAME
+  template:
+    metadata:
+      labels:
+        app: $LOAD_GEN_NAME
+    spec:
+      containers:
+      - name: stress
+        image: containerstack/cpustress
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m      # Higher limit to stress more
+            memory: 256Mi
+        command: ["/app/cpustress"]
+        args: ["-cpus", "2"]  # Stress 2 CPU cores
+EOF
 
-echo "$LOAD_GEN_RESULT"
+# Wait for load generator to start
+echo "Waiting for load generator pods to start..."
+sleep 15
 
 # Verify load generator is running
-LOAD_GEN_STATUS=$(kubectl get pod $LOAD_GEN_NAME \
-  --output jsonpath='{.status.phase}')
-echo "Load generator status: $LOAD_GEN_STATUS"
+LOAD_GEN_STATUS=$(kubectl get deployment $LOAD_GEN_NAME \
+  --output jsonpath='{.status.readyReplicas}')
+echo "Load generator ready replicas: $LOAD_GEN_STATUS"
 
-# Expose the application as a service for load testing
-SERVICE_RESULT=$(kubectl expose deployment $APP_NAME \
-  --port=80 \
-  --target-port=8080 \
-  --type=ClusterIP \
-  2>/dev/null || echo "Service already exists")
+# Check combined CPU usage
+echo ""
+echo "Combined CPU usage:"
+kubectl top pods
+```
 
-echo "$SERVICE_RESULT"
+**Option C - Exec into pod and increase stress (Interactive):**
+```bash
+# Get the pod name
+POD_NAME=$(kubectl get pods -l app=$APP_NAME \
+  --output jsonpath='{.items[0].metadata.name}')
+
+echo "Current pod: $POD_NAME"
+
+# Note: The cpu-stress container will automatically consume CPU
+# To verify it's working, check metrics:
+kubectl top pod $POD_NAME
 ```
 
 ---
@@ -444,12 +481,11 @@ kubectl delete hpa $HPA_NAME
 # Delete deployment
 kubectl delete deployment $APP_NAME
 
-# Delete service
+# Delete service (if any)
 kubectl delete service $APP_NAME --ignore-not-found=true
 
-# Delete load generator (if running)
-kubectl delete pod $LOAD_GEN_NAME --ignore-not-found=true
-kubectl delete deployment $LOAD_GEN_NAME --ignore-not-found=true
+# Delete load generator deployment (if created)
+kubectl delete deployment cpu-stress-load --ignore-not-found=true
 
 # Verify cleanup
 echo "Remaining resources:"
