@@ -1,4 +1,5 @@
 # Lab 1c: Node Pool Upgrade with Surge
+<img width="1536" height="537" alt="ZIMAGE" src="https://github.com/user-attachments/assets/9b5cf7f8-1cd1-4267-a0fa-a6341353e7f0" />
 
 ## Objective
 Perform a controlled node pool upgrade using **max surge** while validating application continuity and ensuring zero downtime.
