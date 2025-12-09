@@ -4,35 +4,155 @@
 Deploy a CPU-intensive workload and observe HPA-driven pod autoscaling.
 
 ## Prerequisites
-- AKS cluster running
-- `kubectl` configured
-- Metrics Server enabled on the cluster
+- Azure CLI installed and authenticated
+- `kubectl` installed
+- Sufficient Azure subscription quota for AKS
 
-## Steps
+---
 
-### 1. Verify Metrics Server
+## 1. Set Lab Parameters
+
 ```bash
-kubectl get deployment metrics-server -n kube-system
+# Lab configuration variables
+RESOURCE_GROUP="rg-aks-hpa-lab"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-hpa-demo"
+NODE_COUNT=2
+NODE_VM_SIZE="Standard_D2s_v3"
+MIN_NODE_COUNT=2
+MAX_NODE_COUNT=5
+
+# Display configuration
+echo "=== Lab Configuration ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Node Count: $NODE_COUNT"
+echo "Node VM Size: $NODE_VM_SIZE"
+echo "Autoscaler Min: $MIN_NODE_COUNT"
+echo "Autoscaler Max: $MAX_NODE_COUNT"
+echo "========================="
 ```
 
-If not installed, enable it:
+---
+
+## 2. Create Resource Group and AKS Cluster
+
 ```bash
-az aks update \
-  --resource-group <resource-group> \
-  --name <cluster-name> \
+# Create resource group and capture result
+RG_RESULT=$(az group create \
+  --name $RESOURCE_GROUP \
+  --location $LOCATION \
+  --query 'properties.provisioningState' \
+  --output tsv)
+
+echo "Resource Group creation: $RG_RESULT"
+
+# Create AKS cluster with metrics server enabled
+echo "Creating AKS cluster (this may take 5-10 minutes)..."
+CLUSTER_RESULT=$(az aks create \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --node-count $NODE_COUNT \
+  --node-vm-size $NODE_VM_SIZE \
   --enable-managed-identity \
-  --enable-metrics-server
+  --enable-cluster-autoscaler \
+  --min-count $MIN_NODE_COUNT \
+  --max-count $MAX_NODE_COUNT \
+  --generate-ssh-keys \
+  --query 'provisioningState' \
+  --output tsv)
+
+echo "AKS cluster creation: $CLUSTER_RESULT"
+
+# Get AKS credentials and store cluster FQDN
+CLUSTER_FQDN=$(az aks show \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --query 'fqdn' \
+  --output tsv)
+
+echo "Cluster FQDN: $CLUSTER_FQDN"
+
+# Configure kubectl context
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing
+
+# Verify cluster connectivity
+CURRENT_CONTEXT=$(kubectl config current-context)
+echo "Current kubectl context: $CURRENT_CONTEXT"
+
+# Display cluster nodes
+echo "Cluster nodes:"
+kubectl get nodes
 ```
 
-### 2. Deploy CPU-Intensive Application
-Create a deployment file `cpu-stress-deployment.yaml`:
+---
+
+## 3. Verify Metrics Server
+
+```bash
+# Check if metrics server is running
+METRICS_SERVER_STATUS=$(kubectl get deployment metrics-server \
+  -n kube-system \
+  --ignore-not-found=true \
+  --output jsonpath='{.status.availableReplicas}' 2>/dev/null)
+
+if [ -z "$METRICS_SERVER_STATUS" ] || [ "$METRICS_SERVER_STATUS" == "0" ]; then
+  echo "Metrics server not available. Enabling..."
+  
+  # Enable metrics server on AKS
+  az aks update \
+    --resource-group $RESOURCE_GROUP \
+    --name $CLUSTER_NAME \
+    --enable-managed-identity \
+    --enable-metrics-server
+  
+  echo "Waiting for metrics server to be ready..."
+  sleep 30
+else
+  echo "Metrics server is running with $METRICS_SERVER_STATUS replicas"
+fi
+
+# Verify metrics server is responding
+echo "Testing metrics server..."
+kubectl top nodes || echo "Metrics not yet available (may take 1-2 minutes after enabling)"
+```
+
+---
+
+## 4. Deploy CPU-Intensive Application
+
+```bash
+# Application configuration variables
+APP_NAME="cpu-stress"
+APP_NAMESPACE="default"
+CPU_REQUEST="100m"
+CPU_LIMIT="200m"
+MEMORY_REQUEST="128Mi"
+MEMORY_LIMIT="256Mi"
+REPLICAS=1
+
+echo "=== Application Configuration ==="
+echo "App Name: $APP_NAME"
+echo "Namespace: $APP_NAMESPACE"
+echo "CPU Request: $CPU_REQUEST"
+echo "CPU Limit: $CPU_LIMIT"
+echo "Memory Request: $MEMORY_REQUEST"
+echo "Memory Limit: $MEMORY_LIMIT"
+echo "Initial Replicas: $REPLICAS"
+echo "================================="
+```
+
+Create `cpu-stress-deployment.yaml`:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cpu-stress
-  namespace: default
 spec:
   replicas: 1
   selector:
@@ -48,110 +168,343 @@ spec:
         image: containerstack/cpustress
         resources:
           requests:
-            cpu: 100m
-            memory: 128Mi
+            cpu: 100m      # Minimum CPU required for scheduling
+            memory: 128Mi  # Minimum memory required
           limits:
-            cpu: 200m
-            memory: 256Mi
+            cpu: 200m      # Maximum CPU the container can use
+            memory: 256Mi  # Maximum memory the container can use
         command: ["/app/cpustress"]
-        args: ["-cpus", "1"]
+        args: ["-cpus", "1"]  # Stress 1 CPU core
 ```
 
 Apply the deployment:
 ```bash
-kubectl apply -f cpu-stress-deployment.yaml
+# Create the deployment
+DEPLOY_RESULT=$(kubectl apply -f cpu-stress-deployment.yaml)
+echo "$DEPLOY_RESULT"
+
+# Wait for deployment to be ready
+echo "Waiting for deployment to be ready..."
+kubectl wait --for=condition=available \
+  --timeout=120s \
+  deployment/$APP_NAME
+
+# Verify deployment is running
+DEPLOYMENT_STATUS=$(kubectl get deployment $APP_NAME \
+  --output jsonpath='{.status.availableReplicas}')
+echo "Deployment $APP_NAME has $DEPLOYMENT_STATUS available replicas"
+
+# Get pod details
+echo "Pod status:"
+POD_NAME=$(kubectl get pods -l app=$APP_NAME \
+  --output jsonpath='{.items[0].metadata.name}')
+echo "Pod name: $POD_NAME"
+
+kubectl get pods -l app=$APP_NAME
 ```
 
-### 3. Create Horizontal Pod Autoscaler
+---
+
+## 5. Create Horizontal Pod Autoscaler (HPA)
+
 ```bash
-kubectl autoscale deployment cpu-stress \
-  --cpu-percent=50 \
-  --min=1 \
-  --max=10
+# HPA configuration variables
+HPA_NAME="cpu-stress-hpa"
+HPA_MIN_REPLICAS=1
+HPA_MAX_REPLICAS=10
+HPA_CPU_TARGET=50
+
+echo "=== HPA Configuration ==="
+echo "HPA Name: $HPA_NAME"
+echo "Min Replicas: $HPA_MIN_REPLICAS"
+echo "Max Replicas: $HPA_MAX_REPLICAS"
+echo "CPU Target: ${HPA_CPU_TARGET}%"
+echo "========================="
 ```
 
-Or use a YAML manifest `hpa.yaml`:
+**Option A - Imperative:**
+```bash
+# Create HPA using kubectl command
+HPA_CREATE_RESULT=$(kubectl autoscale deployment $APP_NAME \
+  --name=$HPA_NAME \
+  --cpu-percent=$HPA_CPU_TARGET \
+  --min=$HPA_MIN_REPLICAS \
+  --max=$HPA_MAX_REPLICAS)
+
+echo "$HPA_CREATE_RESULT"
+```
+
+**Option B - Declarative (Recommended):**
+
+Create `hpa.yaml`:
+
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: cpu-stress-hpa
-  namespace: default
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: cpu-stress
-  minReplicas: 1
-  maxReplicas: 10
+    name: cpu-stress              # Target deployment to scale
+  minReplicas: 1                  # Minimum number of replicas
+  maxReplicas: 10                 # Maximum number of replicas
   metrics:
   - type: Resource
     resource:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 50
+        averageUtilization: 50    # Scale when average CPU exceeds 50%
 ```
 
-Apply:
+Apply the HPA:
 ```bash
-kubectl apply -f hpa.yaml
+# Create HPA resource
+HPA_APPLY_RESULT=$(kubectl apply -f hpa.yaml)
+echo "$HPA_APPLY_RESULT"
+
+# Wait a few seconds for HPA to initialize
+sleep 5
+
+# Verify HPA is created and get current status
+HPA_STATUS=$(kubectl get hpa $HPA_NAME \
+  --output jsonpath='{.status.conditions[?(@.type=="ScalingActive")].status}')
+echo "HPA ScalingActive status: $HPA_STATUS"
+
+# Display HPA details
+kubectl get hpa $HPA_NAME
+
+# View detailed HPA information
+echo ""
+echo "=== HPA Details ==="
+kubectl describe hpa $HPA_NAME
 ```
-
-### 4. Generate Load
-Create a load generator pod:
-```bash
-kubectl run load-generator -it --rm --image=busybox -- /bin/sh
-
-# Inside the pod
-while true; do wget -q -O- http://cpu-stress.default.svc.cluster.local; done
-```
-
-### 5. Monitor HPA Behavior
-Watch the HPA in action:
-```bash
-kubectl get hpa cpu-stress-hpa --watch
-```
-
-Check pod scaling:
-```bash
-kubectl get pods -l app=cpu-stress --watch
-```
-
-View detailed HPA status:
-```bash
-kubectl describe hpa cpu-stress-hpa
-```
-
-### 6. Observe Metrics
-```bash
-kubectl top pods -l app=cpu-stress
-kubectl top nodes
-```
-
-## Expected Results
-- HPA should scale pods from 1 to multiple replicas when CPU exceeds 50%
-- Scaling should occur within 1-3 minutes of load increase
-- Pods should scale down after load decreases (after cooldown period ~5 minutes)
-
-## Cleanup
-```bash
-kubectl delete hpa cpu-stress-hpa
-kubectl delete deployment cpu-stress
-kubectl delete pod load-generator
-```
-
-## Key Takeaways
-- HPA automatically scales pods based on observed CPU/memory metrics
-- Proper resource requests are critical for HPA to function correctly
-- Cooldown periods prevent rapid scaling fluctuations
-- Metrics Server is required for HPA to collect pod metrics
-
-## Troubleshooting
-- **HPA shows `<unknown>` for metrics**: Metrics Server may not be running or pods lack resource requests
-- **Pods not scaling**: Check if CPU threshold is actually being exceeded
-- **Slow scaling**: Default HPA sync period is 15 seconds, scaling decisions take time
 
 ---
 
-**Author:** Georges Bou Ghantous, Ph.D.
+## 6. Generate Load
+
+**Option A - Interactive load generator:**
+```bash
+# Run a temporary pod to generate traffic
+kubectl run load-generator \
+  --image=busybox \
+  --restart=Never \
+  --rm \
+  -it \
+  -- /bin/sh -c "while true; do wget -q -O- http://$APP_NAME.$APP_NAMESPACE.svc.cluster.local; done"
+```
+
+**Option B - Background load generator (Recommended for monitoring):**
+```bash
+# Load generator configuration
+LOAD_GEN_NAME="load-generator"
+
+echo "Starting load generator: $LOAD_GEN_NAME"
+
+# Create a deployment that generates continuous load
+LOAD_GEN_RESULT=$(kubectl run $LOAD_GEN_NAME \
+  --image=busybox \
+  --restart=Always \
+  -- /bin/sh -c "while true; do wget -q -O- http://$APP_NAME.$APP_NAMESPACE.svc.cluster.local; done")
+
+echo "$LOAD_GEN_RESULT"
+
+# Verify load generator is running
+LOAD_GEN_STATUS=$(kubectl get pod $LOAD_GEN_NAME \
+  --output jsonpath='{.status.phase}')
+echo "Load generator status: $LOAD_GEN_STATUS"
+
+# Expose the application as a service for load testing
+SERVICE_RESULT=$(kubectl expose deployment $APP_NAME \
+  --port=80 \
+  --target-port=8080 \
+  --type=ClusterIP \
+  2>/dev/null || echo "Service already exists")
+
+echo "$SERVICE_RESULT"
+```
+
+---
+
+## 7. Monitor HPA Behavior
+
+```bash
+# Get initial replica count
+INITIAL_REPLICAS=$(kubectl get deployment $APP_NAME \
+  --output jsonpath='{.spec.replicas}')
+echo "Initial replicas: $INITIAL_REPLICAS"
+
+# Watch HPA status in real-time (shows current/target CPU and replica count)
+echo ""
+echo "=== Monitoring HPA (Ctrl+C to stop) ==="
+echo "Watch for CPU% to exceed target and replicas to increase..."
+kubectl get hpa $HPA_NAME --watch
+```
+
+In a separate terminal, run these monitoring commands:
+```bash
+# Set variables (if in new terminal)
+APP_NAME="cpu-stress"
+HPA_NAME="cpu-stress-hpa"
+
+# Watch pods being created/terminated
+kubectl get pods -l app=$APP_NAME --watch
+```
+
+Additional monitoring commands:
+```bash
+# View detailed HPA events and conditions
+echo "=== HPA Detailed Status ==="
+kubectl describe hpa $HPA_NAME
+
+# Check current CPU/memory usage per pod
+echo ""
+echo "=== Pod Resource Usage ==="
+kubectl top pods -l app=$APP_NAME
+
+# Get current replica count
+CURRENT_REPLICAS=$(kubectl get deployment $APP_NAME \
+  --output jsonpath='{.status.replicas}')
+READY_REPLICAS=$(kubectl get deployment $APP_NAME \
+  --output jsonpath='{.status.readyReplicas}')
+echo ""
+echo "Current replicas: $CURRENT_REPLICAS"
+echo "Ready replicas: $READY_REPLICAS"
+
+# Check node resource utilization
+echo ""
+echo "=== Node Resource Usage ==="
+kubectl top nodes
+
+# View HPA scaling events
+echo ""
+echo "=== Recent HPA Events ==="
+kubectl get events \
+  --field-selector involvedObject.name=$HPA_NAME \
+  --sort-by='.lastTimestamp' \
+  | tail -20
+
+# Monitor scaling metrics in real-time
+echo ""
+echo "=== Current HPA Metrics ==="
+HPA_CURRENT_CPU=$(kubectl get hpa $HPA_NAME \
+  --output jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}')
+HPA_TARGET_CPU=$(kubectl get hpa $HPA_NAME \
+  --output jsonpath='{.spec.metrics[0].resource.target.averageUtilization}')
+HPA_CURRENT_REPLICAS=$(kubectl get hpa $HPA_NAME \
+  --output jsonpath='{.status.currentReplicas}')
+HPA_DESIRED_REPLICAS=$(kubectl get hpa $HPA_NAME \
+  --output jsonpath='{.status.desiredReplicas}')
+
+echo "Current CPU: ${HPA_CURRENT_CPU}%"
+echo "Target CPU: ${HPA_TARGET_CPU}%"
+echo "Current Replicas: $HPA_CURRENT_REPLICAS"
+echo "Desired Replicas: $HPA_DESIRED_REPLICAS"
+```
+
+---
+
+## 🔍 Understanding HPA v2 Behavior
+
+### Stabilization Windows
+HPA v2 uses stabilization windows to prevent "flapping" (rapid scaling up and down):
+
+- **Scale-up window**: Default 0 seconds (scales up immediately when threshold exceeded)
+- **Scale-down window**: Default 300 seconds (5 minutes - waits before scaling down)
+
+This asymmetric behavior ensures:
+- Quick response to increased load
+- Stability during temporary CPU spikes
+- Gradual scale-down to avoid service disruption
+
+---
+
+## Expected Results
+- HPA scales pods from **1 → multiple replicas** when CPU exceeds 50%
+- Scaling occurs within **1–3 minutes**
+- Scale-down occurs after the stabilization window (~5 minutes)
+
+---
+
+## Cleanup
+
+### Option 1: Delete Kubernetes Resources Only
+```bash
+# Set variables if needed
+APP_NAME="cpu-stress"
+HPA_NAME="cpu-stress-hpa"
+LOAD_GEN_NAME="load-generator"
+
+# Delete HPA
+kubectl delete hpa $HPA_NAME
+
+# Delete deployment
+kubectl delete deployment $APP_NAME
+
+# Delete service
+kubectl delete service $APP_NAME --ignore-not-found=true
+
+# Delete load generator (if running)
+kubectl delete pod $LOAD_GEN_NAME --ignore-not-found=true
+kubectl delete deployment $LOAD_GEN_NAME --ignore-not-found=true
+
+# Verify cleanup
+echo "Remaining resources:"
+kubectl get all -l app=$APP_NAME
+```
+
+### Option 2: Delete Entire Resource Group (Complete Cleanup)
+```bash
+# Set variables if needed
+RESOURCE_GROUP="rg-aks-hpa-lab"
+
+# Delete the entire resource group (removes AKS cluster and all resources)
+echo "Deleting resource group $RESOURCE_GROUP..."
+DELETE_RESULT=$(az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait \
+  --output tsv)
+
+echo "Delete operation initiated: $DELETE_RESULT"
+
+# Verify deletion (optional - check after a few minutes)
+echo ""
+echo "To verify deletion status, run:"
+echo "az group show --name $RESOURCE_GROUP --query properties.provisioningState"
+```
+
+---
+
+## 📘 How This Lab Connects to Cluster Autoscaler (Next Lab)
+
+This lab introduces **pod-level scaling** via HPA.  
+Later labs will demonstrate how HPA and Cluster Autoscaler work together:
+
+- When HPA increases replicas, node capacity may become insufficient  
+- Cluster Autoscaler (CA) automatically **adds new nodes** to accommodate pod scheduling  
+- Together, HPA (pods) + CA (nodes) enable **full-stack autoscaling** in AKS  
+
+Mastering HPA here is essential before learning **node-level autoscaling**.
+
+---
+
+## Key Takeaways
+- HPA scales pods automatically based on CPU demand  
+- Stabilization windows prevent unstable oscillations  
+- Resource requests are required for accurate HPA decisions  
+- HPA behavior directly influences Cluster Autoscaler actions  
+
+---
+
+## Troubleshooting
+- `<unknown>` metrics → Metrics Server not running  
+- No scaling → CPU threshold not exceeded  
+- Slow scaling → stabilization window delays decisions  
+
+---
+
+
