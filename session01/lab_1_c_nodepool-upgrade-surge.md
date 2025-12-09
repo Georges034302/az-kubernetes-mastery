@@ -153,9 +153,6 @@ az aks nodepool list \
 ---
 
 ## 5. Deploy HA Test Application
----
-
-## 5. Deploy HA Test Application
 
 Create `ha-deployment.yaml`:
 
