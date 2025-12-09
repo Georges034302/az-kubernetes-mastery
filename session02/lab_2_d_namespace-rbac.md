@@ -1,4 +1,5 @@
 # Lab 2d: Namespace-Scoped RBAC for Multi-Team Isolation
+<img width="1382" height="738" alt="ZIMAGE" src="https://github.com/user-attachments/assets/28d466e0-0d5a-4585-b683-58da93757ff6" />
 
 ## Objective
 Create a complete multi-tenant AKS environment with **namespace-scoped RBAC** for multiple teams, demonstrating proper isolation, resource quotas, and least-privilege access patterns for production-grade Kubernetes governance.
