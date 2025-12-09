@@ -1,4 +1,5 @@
 # Lab 2b: KEDA Queue Autoscaling
+<img width="1536" height="1024" alt="ZIMAGE" src="https://github.com/user-attachments/assets/731e1551-a743-424c-85fd-f9551c730a64" />
 
 ## Objective
 Deploy **KEDA** (Kubernetes Event-Driven Autoscaling) on AKS, configure a **ScaledObject** that monitors an Azure Storage Queue, and observe **event-driven autoscaling** from 0 → N replicas based on queue depth, then back to 0 when empty.
