@@ -1,4 +1,5 @@
 # Lab 2a: Enable Azure Policy Add-on
+<img width="1482" height="715" alt="ZIMAGE" src="https://github.com/user-attachments/assets/ed3f9e6d-f30b-416f-8a45-8dc0625abc2c" />
 
 ## Objective
 Enable and validate Azure Policy governance enforcement on AKS by applying built-in Pod Security policies and verifying that **privileged containers are denied** through Gatekeeper (OPA).
