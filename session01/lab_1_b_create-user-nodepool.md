@@ -1,4 +1,5 @@
 # Lab 1b: Create a User Node Pool for Batch Workloads
+<img width="1536" height="1024" alt="ZIMAGE" src="https://github.com/user-attachments/assets/0d9d5fb4-d407-4c39-955c-4b82c225a04f" />
 
 ## Objective
 Create a dedicated AKS user node pool for batch workloads using labels, taints, and tolerations, then validate workload placement through Jobs, DaemonSets, and node affinity.
