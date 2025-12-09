@@ -1,4 +1,5 @@
 # Lab 2c: RBAC Authentication with Microsoft Entra ID
+<img width="1536" height="660" alt="ZIMAGE" src="https://github.com/user-attachments/assets/34264934-4dfc-4eba-930c-32d1bb3bcc88" />
 
 ## Objective
 Build a complete AKS + Microsoft Entra ID RBAC environment from scratch, configure **Azure RBAC** for API server access and **Kubernetes RBAC** for namespace-level authorization, and validate least-privilege access patterns.
