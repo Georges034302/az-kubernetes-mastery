@@ -1,92 +1,193 @@
 # Lab 6c: MLflow on AKS with Databricks
 
 ## Objective
-Deploy and manage ML models using MLflow on AKS integrated with Databricks.
+Deploy MLflow tracking server on AKS and integrate with Databricks for end-to-end ML lifecycle management. Master experiment tracking, model registry, versioning, and production deployment of ML models on Kubernetes with A/B testing capabilities.
 
-## Prerequisites
-- AKS cluster running
-- Azure Databricks workspace
-- Azure Container Registry (ACR)
-- Azure ML workspace (optional)
-- `kubectl` and `az` CLI configured
+---
 
-## Steps
+## Lab Parameters
 
-### 1. Set Up Azure Container Registry
+Set these variables at the start:
+
 ```bash
-# Set variables
-RESOURCE_GROUP="aks-databricks-rg"
-ACR_NAME="aksmlflowacr$RANDOM"
-LOCATION="eastus"
-AKS_CLUSTER="aks-spark-cluster"
+# Azure Resources
+RESOURCE_GROUP="rg-aks-mlflow"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-mlflow-cluster"
+NODE_COUNT=3
+NODE_SIZE="Standard_D4s_v3"
+K8S_VERSION="1.28"
 
-# Create ACR
-az acr create \
-  --resource-group $RESOURCE_GROUP \
-  --name $ACR_NAME \
-  --sku Standard \
-  --location $LOCATION
+# Azure Container Registry
+ACR_NAME="mlflowacr$RANDOM"
+ACR_SKU="Standard"
 
-# Enable admin access
-az acr update \
-  --name $ACR_NAME \
-  --admin-enabled true
+# Databricks Configuration
+DATABRICKS_WORKSPACE="databricks-mlflow-workspace"
+DATABRICKS_SKU="premium"
 
-# Get ACR credentials
-ACR_USERNAME=$(az acr credential show --name $ACR_NAME --query username -o tsv)
-ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query passwords[0].value -o tsv)
-ACR_SERVER="${ACR_NAME}.azurecr.io"
+# MLflow Configuration
+MLFLOW_NAMESPACE="mlflow"
+MLFLOW_VERSION="2.9.0"
+MLFLOW_PVC_SIZE="50Gi"
+POSTGRES_PASSWORD="mlflow$(openssl rand -hex 8)"
 
-echo "ACR Server: $ACR_SERVER"
+# Model Serving
+MODEL_NAME="diabetes-rf-model"
+EXPERIMENT_NAME="diabetes-prediction"
 ```
 
-### 2. Attach ACR to AKS
-```bash
-# Attach ACR to AKS cluster
-az aks update \
-  --resource-group $RESOURCE_GROUP \
-  --name $AKS_CLUSTER \
-  --attach-acr $ACR_NAME
+---
 
-# Verify integration
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \      # `Resource group name`
+  --location $LOCATION          # `Azure region (Sydney, Australia)`
+```
+
+---
+
+## Step 2: Create Azure Container Registry
+
+```bash
+az acr create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $ACR_NAME \                       # `ACR name`
+  --sku $ACR_SKU \                         # `SKU tier`
+  --location $LOCATION \                   # `Region`
+  --admin-enabled true                     # `Enable admin account`
+
+ACR_USERNAME=$(az acr credential show \
+  --name $ACR_NAME \
+  --query username \
+  -o tsv)                                  # `Get ACR username`
+
+ACR_PASSWORD=$(az acr credential show \
+  --name $ACR_NAME \
+  --query passwords[0].value \
+  -o tsv)                                  # `Get ACR password`
+
+ACR_SERVER="${ACR_NAME}.azurecr.io"        # `Construct ACR server URL`
+
+echo "ACR created: $ACR_NAME"
+echo "ACR Server: $ACR_SERVER"
+echo "ACR Username: $ACR_USERNAME"
+```
+
+---
+
+## Step 3: Create AKS Cluster
+
+```bash
+az aks create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $CLUSTER_NAME \                   # `Cluster name`
+  --location $LOCATION \                   # `Region`
+  --node-count $NODE_COUNT \               # `Number of nodes`
+  --node-vm-size $NODE_SIZE \              # `VM size (4 vCPU, 16GB for ML)`
+  --kubernetes-version $K8S_VERSION \      # `Kubernetes version`
+  --enable-managed-identity \              # `Use managed identity`
+  --generate-ssh-keys \                    # `Generate SSH keys`
+  --network-plugin azure \                 # `Azure CNI networking`
+  --attach-acr $ACR_NAME \                 # `Attach ACR for image pull`
+  --no-wait                                # `Don't wait for completion`
+
+az aks wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --created                                # `Wait for cluster creation`
+
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing                     # `Configure kubectl`
+
+echo "AKS cluster created: $CLUSTER_NAME"
+```
+
+Verify ACR integration:
+```bash
 az aks check-acr \
   --resource-group $RESOURCE_GROUP \
-  --name $AKS_CLUSTER \
-  --acr "${ACR_SERVER}"
+  --name $CLUSTER_NAME \
+  --acr $ACR_SERVER                        # `Verify ACR connectivity`
 ```
 
-### 3. Deploy MLflow Tracking Server on AKS
-Create namespace and storage:
+---
+
+## Step 4: Create Azure Databricks Workspace
 
 ```bash
-# Create namespace
-kubectl create namespace mlflow
+az databricks workspace create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $DATABRICKS_WORKSPACE \           # `Workspace name`
+  --location $LOCATION \                   # `Region`
+  --sku $DATABRICKS_SKU                    # `SKU (premium for advanced features)`
 
-# Create PVC for MLflow artifacts
-cat <<EOF | kubectl apply -f -
+az databricks workspace wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $DATABRICKS_WORKSPACE \
+  --created                                # `Wait for workspace creation`
+
+DATABRICKS_URL=$(az databricks workspace show \
+  --resource-group $RESOURCE_GROUP \
+  --name $DATABRICKS_WORKSPACE \
+  --query workspaceUrl \
+  -o tsv)                                  # `Get workspace URL`
+
+echo "Databricks workspace created: $DATABRICKS_WORKSPACE"
+echo "Databricks URL: https://$DATABRICKS_URL"
+```
+
+---
+
+## Step 5: Deploy MLflow Tracking Server on AKS
+
+Create namespace:
+```bash
+kubectl create namespace $MLFLOW_NAMESPACE  # `Create namespace for MLflow`
+
+echo "Namespace created: $MLFLOW_NAMESPACE"
+```
+
+Create PVC for MLflow artifacts:
+```bash
+kubectl apply --namespace $MLFLOW_NAMESPACE -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: mlflow-pvc
-  namespace: mlflow
 spec:
   accessModes:
-    - ReadWriteOnce
-  storageClassName: default
+    - ReadWriteOnce           # Single node access
+  storageClassName: default   # Default storage class
   resources:
     requests:
-      storage: 50Gi
+      storage: $MLFLOW_PVC_SIZE  # Storage size
 EOF
+
+kubectl wait \
+  --for=jsonpath='{.status.phase}'=Bound \
+  pvc/mlflow-pvc \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for PVC to be bound`
+
+echo "PVC created: mlflow-pvc"
 ```
 
-Create PostgreSQL for MLflow backend:
+---
 
-```yaml
+## Step 6: Deploy PostgreSQL Backend
+
+Create PostgreSQL deployment:
+```bash
+kubectl apply --namespace $MLFLOW_NAMESPACE -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mlflow-postgres
-  namespace: mlflow
 spec:
   replicas: 1
   selector:
@@ -106,12 +207,13 @@ spec:
         - name: POSTGRES_USER
           value: mlflow
         - name: POSTGRES_PASSWORD
-          value: mlflow123
+          value: "$POSTGRES_PASSWORD"
         ports:
         - containerPort: 5432
         volumeMounts:
         - name: postgres-storage
           mountPath: /var/lib/postgresql/data
+          subPath: postgres  # Use subPath to avoid permission issues
       volumes:
       - name: postgres-storage
         persistentVolumeClaim:
@@ -121,23 +223,35 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mlflow-postgres
-  namespace: mlflow
 spec:
   selector:
     app: mlflow-postgres
   ports:
   - port: 5432
     targetPort: 5432
+EOF
+
+kubectl wait \
+  --for=condition=ready pod \
+  -l app=mlflow-postgres \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for PostgreSQL to be ready`
+
+echo "PostgreSQL deployed"
 ```
 
-Deploy MLflow tracking server:
+---
 
-```yaml
+## Step 7: Deploy MLflow Tracking Server
+
+Create MLflow server deployment:
+
+```bash
+kubectl apply --namespace $MLFLOW_NAMESPACE -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mlflow-server
-  namespace: mlflow
 spec:
   replicas: 1
   selector:
@@ -150,12 +264,12 @@ spec:
     spec:
       containers:
       - name: mlflow
-        image: ghcr.io/mlflow/mlflow:v2.9.0
+        image: ghcr.io/mlflow/mlflow:v$MLFLOW_VERSION
         command:
         - mlflow
         - server
         - --backend-store-uri
-        - postgresql://mlflow:mlflow123@mlflow-postgres:5432/mlflow
+        - postgresql://mlflow:$POSTGRES_PASSWORD@mlflow-postgres:5432/mlflow
         - --default-artifact-root
         - /mlflow/artifacts
         - --host
@@ -168,6 +282,7 @@ spec:
         volumeMounts:
         - name: artifacts
           mountPath: /mlflow/artifacts
+          subPath: artifacts  # Use subPath for artifacts
         resources:
           requests:
             cpu: 500m
@@ -184,7 +299,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mlflow-server
-  namespace: mlflow
 spec:
   type: LoadBalancer
   selector:
@@ -193,31 +307,41 @@ spec:
   - port: 5000
     targetPort: 5000
     name: http
-```
+EOF
 
-Apply all:
-```bash
-kubectl apply -f mlflow-postgres.yaml
-kubectl apply -f mlflow-server.yaml
+kubectl wait \
+  --for=condition=ready pod \
+  -l app=mlflow-server \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for MLflow to be ready`
 
-# Wait for services to be ready
-kubectl wait --for=condition=ready pod -l app=mlflow-postgres -n mlflow --timeout=300s
-kubectl wait --for=condition=ready pod -l app=mlflow-server -n mlflow --timeout=300s
+kubectl wait \
+  --for=jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+  svc/mlflow-server \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for external IP`
 
-# Get MLflow UI URL
-MLFLOW_URL=$(kubectl get svc mlflow-server -n mlflow -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+MLFLOW_URL=$(kubectl get svc mlflow-server \
+  --namespace $MLFLOW_NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')  # `Get MLflow URL`
+
+echo "MLflow tracking server deployed"
 echo "MLflow UI: http://$MLFLOW_URL:5000"
 ```
 
-### 4. Configure Databricks to Use MLflow on AKS
-Create notebook in Databricks:
+---
+
+## Step 8: Configure Databricks to Use MLflow on AKS
+
+Create a notebook in Databricks with the following configuration:
 
 ```python
 import mlflow
 import os
 
 # Set tracking URI to AKS MLflow server
-mlflow_tracking_uri = "http://<MLFLOW_URL>:5000"
+# Replace <MLFLOW_URL> with the actual URL from Step 7
+mlflow_tracking_uri = f"http://{os.environ.get('MLFLOW_URL', '<MLFLOW_URL>')}:5000"
 mlflow.set_tracking_uri(mlflow_tracking_uri)
 
 # Verify connection
@@ -225,7 +349,9 @@ print(f"MLflow Tracking URI: {mlflow.get_tracking_uri()}")
 print(f"MLflow Version: {mlflow.__version__}")
 ```
 
-### 5. Train ML Model with MLflow Tracking
+---
+
+## Step 9: Train ML Model with MLflow Tracking
 ```python
 import mlflow
 import mlflow.sklearn
@@ -296,7 +422,9 @@ with mlflow.start_run(run_name="random-forest-v1"):
     print(f"R2 Score: {r2:.2f}")
 ```
 
-### 6. Register Model in MLflow Model Registry
+---
+
+## Step 10: Register Model in MLflow Model Registry
 ```python
 from mlflow.tracking import MlflowClient
 
@@ -331,7 +459,9 @@ model_version = mlflow.register_model(model_uri, model_name)
 print(f"Model Version: {model_version.version}")
 ```
 
-### 7. Transition Model to Production
+---
+
+## Step 11: Transition Model to Production
 ```python
 # Transition model to production
 client.transition_model_version_stage(
@@ -361,9 +491,11 @@ for version in latest_versions:
     print(f"Production Model Version: {version.version}")
 ```
 
-### 8. Build Custom Docker Image for Model Serving
-Create Dockerfile:
+---
 
+## Step 12: Build Custom Docker Image for Model Serving
+
+Create Dockerfile:
 ```dockerfile
 FROM python:3.9-slim
 
@@ -427,25 +559,28 @@ if __name__ == '__main__':
 
 Build and push to ACR:
 ```bash
-# Build image
-docker build -t ${ACR_SERVER}/mlflow-model-server:v1 .
+docker build \
+  -t ${ACR_SERVER}/mlflow-model-server:v1 \
+  .  # `Build Docker image for model serving`
 
-# Login to ACR
-az acr login --name $ACR_NAME
+az acr login \
+  --name $ACR_NAME  # `Login to ACR`
 
-# Push image
-docker push ${ACR_SERVER}/mlflow-model-server:v1
+docker push ${ACR_SERVER}/mlflow-model-server:v1  # `Push image to ACR`
+
+echo "Model server image pushed to ACR"
 ```
 
-### 9. Deploy Model as Kubernetes Service
-Create deployment:
+---
 
-```yaml
+## Step 13: Deploy Model as Kubernetes Service
+Create deployment:
+```bash
+kubectl apply --namespace $MLFLOW_NAMESPACE -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: diabetes-model-server
-  namespace: mlflow
 spec:
   replicas: 3
   selector:
@@ -459,10 +594,10 @@ spec:
     spec:
       containers:
       - name: model-server
-        image: <ACR_SERVER>/mlflow-model-server:v1
+        image: ${ACR_SERVER}/mlflow-model-server:v1
         env:
         - name: MLFLOW_TRACKING_URI
-          value: http://mlflow-server.mlflow:5000
+          value: http://mlflow-server.$MLFLOW_NAMESPACE:5000
         ports:
         - containerPort: 8080
           name: http
@@ -490,7 +625,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: diabetes-model-server
-  namespace: mlflow
 spec:
   type: LoadBalancer
   selector:
@@ -499,18 +633,31 @@ spec:
   - port: 80
     targetPort: 8080
     name: http
-```
+EOF
 
-Deploy:
-```bash
-kubectl apply -f model-server-deployment.yaml
+kubectl wait \
+  --for=condition=ready pod \
+  -l app=diabetes-model-server \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for model server pods`
 
-# Get service URL
-MODEL_URL=$(kubectl get svc diabetes-model-server -n mlflow -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+kubectl wait \
+  --for=jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+  svc/diabetes-model-server \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for external IP`
+
+MODEL_URL=$(kubectl get svc diabetes-model-server \
+  --namespace $MLFLOW_NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')  # `Get model server URL`
+
+echo "Model server deployed"
 echo "Model Server URL: http://$MODEL_URL"
 ```
 
-### 10. Test Model Endpoint
+---
+
+## Step 14: Test Model Endpoint
 ```bash
 # Test health endpoint
 curl http://$MODEL_URL/health
@@ -547,8 +694,11 @@ predictions = response.json()
 print("Predictions:", predictions)
 ```
 
-### 11. Implement A/B Testing with Multiple Models
-Train a second model variant:
+---
+
+## Step 15: Implement A/B Testing with Multiple Models
+
+Train a second model variant in Databricks:
 
 ```python
 # Train alternative model (Gradient Boosting)
@@ -588,13 +738,13 @@ with mlflow.start_run(run_name="gradient-boosting-v1"):
 ```
 
 Deploy both models with Istio traffic splitting:
-
-```yaml
+```bash
+# Deploy v2 model
+kubectl apply --namespace $MLFLOW_NAMESPACE -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: diabetes-model-v2
-  namespace: mlflow
 spec:
   replicas: 2
   selector:
@@ -609,20 +759,40 @@ spec:
     spec:
       containers:
       - name: model-server
-        image: <ACR_SERVER>/mlflow-model-gb:v1
+        image: ${ACR_SERVER}/mlflow-model-gb:v1
         env:
         - name: MLFLOW_TRACKING_URI
-          value: http://mlflow-server.mlflow:5000
+          value: http://mlflow-server.$MLFLOW_NAMESPACE:5000
         - name: MODEL_NAME
           value: diabetes-gb-model
         ports:
         - containerPort: 8080
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: diabetes-model-server
+spec:
+  host: diabetes-model-server
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
 ---
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: diabetes-model
-  namespace: mlflow
 spec:
   hosts:
   - diabetes-model-server
@@ -639,14 +809,25 @@ spec:
     - destination:
         host: diabetes-model-server
         subset: v1
-      weight: 90
+      weight: 90  # 90% traffic to v1
     - destination:
         host: diabetes-model-server
         subset: v2
-      weight: 10
+      weight: 10  # 10% traffic to v2 for testing
+EOF
+
+kubectl wait \
+  --for=condition=ready pod \
+  -l app=diabetes-model-server,version=v2 \
+  --namespace $MLFLOW_NAMESPACE \
+  --timeout=300s  # `Wait for v2 model pods`
+
+echo "A/B testing configured: 90% v1, 10% v2"
 ```
 
-### 12. Monitor Model Performance
+---
+
+## Step 16: Monitor Model Performance
 Create monitoring script:
 
 ```python
@@ -684,7 +865,9 @@ actuals = [155, 195, 180]
 log_prediction_metrics("diabetes-rf-model", predictions, actuals)
 ```
 
-### 13. Implement Model Retraining Pipeline
+---
+
+## Step 17: Implement Model Retraining Pipeline
 Create retraining job:
 
 ```yaml
@@ -878,19 +1061,40 @@ current_rmse = check_model_performance()
 print(f"Current RMSE: {current_rmse}")
 ```
 
-### 18. Cleanup
-```bash
-# Delete Kubernetes resources
-kubectl delete namespace mlflow
+---
 
-# Delete ACR images
+## Cleanup
+
+### Option 1: Delete MLflow Kubernetes Resources Only
+```bash
+kubectl delete namespace $MLFLOW_NAMESPACE  # `Delete MLflow namespace and all resources`
+
+echo "MLflow resources deleted"
+```
+
+### Option 2: Delete ACR Images
+```bash
 az acr repository delete \
   --name $ACR_NAME \
   --repository mlflow-model-server \
-  --yes
+  --yes  # `Delete model server image`
 
-# Delete ACR (optional)
-# az acr delete --name $ACR_NAME --resource-group $RESOURCE_GROUP --yes
+az acr repository delete \
+  --name $ACR_NAME \
+  --repository mlflow-model-gb \
+  --yes  # `Delete GB model image`
+
+echo "ACR images deleted"
+```
+
+### Option 3: Delete All Azure Resources
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait  # `Delete entire resource group`
+
+echo "Resource group deletion initiated: $RESOURCE_GROUP"
 ```
 
 ## Expected Results
