@@ -1,55 +1,154 @@
 # Lab 4c: Fluent Bit Central Logging
 
 ## Objective
-Forward AKS logs to Log Analytics using Fluent Bit.
+Forward AKS container logs to Log Analytics using Fluent Bit for centralized monitoring, enrichment, parsing, and search.
 
 ## Prerequisites
-- AKS cluster running
-- Log Analytics workspace
-- `kubectl` and Azure CLI configured
+- Azure CLI installed and authenticated
+- `kubectl` installed
 - Helm 3 installed
 
-## Steps
+---
 
-### 1. Get Log Analytics Workspace Credentials
+## Lab Parameters
+
 ```bash
-# Get workspace ID and key
+# Resource and location settings
+RESOURCE_GROUP="rg-aks-fluentbit-lab"
+LOCATION="australiaeast"  # Sydney, Australia
+
+# AKS cluster settings
+CLUSTER_NAME="aks-fluentbit-cluster"
+NODE_COUNT=2
+NODE_SIZE="Standard_D2s_v3"
+K8S_VERSION="1.29"
+
+# Log Analytics workspace settings
+WORKSPACE_NAME="law-aks-fluentbit"
+
+# Fluent Bit settings
+LOGGING_NAMESPACE="logging"
+FLUENTBIT_RELEASE="fluent-bit"
+FLUENTBIT_CHART="fluent/fluent-bit"
+
+# Test application settings
+APP_NAMESPACE="default"
+```
+
+Display configuration:
+```bash
+echo "=== Lab 4c: Fluent Bit Central Logging ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Node Count: $NODE_COUNT"
+echo "Node Size: $NODE_SIZE"
+echo "Kubernetes Version: $K8S_VERSION"
+echo "Log Analytics Workspace: $WORKSPACE_NAME"
+echo "Logging Namespace: $LOGGING_NAMESPACE"
+echo "Fluent Bit Release: $FLUENTBIT_RELEASE"
+echo "App Namespace: $APP_NAMESPACE"
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \           # `Resource group name`
+  --location $LOCATION                # `Azure region`
+```
+
+---
+
+## Step 2: Create Log Analytics Workspace
+
+```bash
+az monitor log-analytics workspace create \
+  --resource-group $RESOURCE_GROUP \  # `Resource group`
+  --workspace-name $WORKSPACE_NAME \  # `Workspace name`
+  --location $LOCATION                # `Azure region`
+```
+
+Capture workspace credentials:
+```bash
 WORKSPACE_ID=$(az monitor log-analytics workspace show \
-  --resource-group <workspace-resource-group> \
-  --workspace-name <workspace-name> \
-  --query customerId -o tsv)
+  --resource-group $RESOURCE_GROUP \
+  --workspace-name $WORKSPACE_NAME \
+  --query customerId \
+  --output tsv)
 
 WORKSPACE_KEY=$(az monitor log-analytics workspace get-shared-keys \
-  --resource-group <workspace-resource-group> \
-  --workspace-name <workspace-name> \
-  --query primarySharedKey -o tsv)
+  --resource-group $RESOURCE_GROUP \
+  --workspace-name $WORKSPACE_NAME \
+  --query primarySharedKey \
+  --output tsv)
 
 echo "Workspace ID: $WORKSPACE_ID"
+echo "Workspace Key: ${WORKSPACE_KEY:0:20}..."
 ```
 
-### 2. Create Namespace for Logging
+---
+
+## Step 3: Create AKS Cluster
+
 ```bash
-kubectl create namespace logging
+az aks create \
+  --resource-group $RESOURCE_GROUP \           # `Resource group`
+  --name $CLUSTER_NAME \                       # `Cluster name`
+  --location $LOCATION \                       # `Azure region`
+  --node-count $NODE_COUNT \                   # `Number of nodes`
+  --node-vm-size $NODE_SIZE \                  # `VM size for nodes`
+  --kubernetes-version $K8S_VERSION \          # `Kubernetes version`
+  --network-plugin azure \                     # `Azure CNI networking`
+  --generate-ssh-keys                          # `Generate SSH keys`
 ```
 
-### 3. Create Secret for Log Analytics Credentials
+Get credentials:
+```bash
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing
+```
+
+---
+
+## Step 4: Create Logging Namespace
+
+```bash
+kubectl create namespace $LOGGING_NAMESPACE
+```
+
+---
+
+## Step 5: Create Secret for Log Analytics Credentials
+
 ```bash
 kubectl create secret generic log-analytics-secret \
-  --from-literal=workspace-id=$WORKSPACE_ID \
-  --from-literal=workspace-key=$WORKSPACE_KEY \
-  -n logging
+  --from-literal=workspace-id=$WORKSPACE_ID \     # `Log Analytics workspace ID`
+  --from-literal=workspace-key=$WORKSPACE_KEY \   # `Log Analytics shared key`
+  --namespace $LOGGING_NAMESPACE                  # `Target namespace`
 ```
 
-### 4. Install Fluent Bit with Helm
-Add Fluent Bit Helm repository:
+---
+
+## Step 6: Add Fluent Bit Helm Repository
 
 ```bash
 helm repo add fluent https://fluent.github.io/helm-charts
 helm repo update
 ```
 
-Create `fluent-bit-values.yaml`:
-```yaml
+---
+
+## Step 7: Create Fluent Bit Helm Values
+
+Create inline Helm values configuration:
+
+```bash
+cat <<EOF > fluent-bit-values.yaml
 config:
   service: |
     [SERVICE]
@@ -104,20 +203,21 @@ config:
         Name modify
         Match kube.*
         Add source_type kubernetes
+        Add cluster_name $CLUSTER_NAME
 
   outputs: |
     [OUTPUT]
         Name azure
         Match kube.*
-        Customer_ID ${WORKSPACE_ID}
-        Shared_Key ${WORKSPACE_KEY}
+        Customer_ID \${WORKSPACE_ID}
+        Shared_Key \${WORKSPACE_KEY}
         Log_Type FluentBit_CL
 
     [OUTPUT]
         Name azure
         Match host.*
-        Customer_ID ${WORKSPACE_ID}
-        Shared_Key ${WORKSPACE_KEY}
+        Customer_ID \${WORKSPACE_ID}
+        Shared_Key \${WORKSPACE_KEY}
         Log_Type FluentBitHost_CL
 
 env:
@@ -148,37 +248,42 @@ resources:
   requests:
     cpu: 100m
     memory: 128Mi
+EOF
 ```
 
-Install Fluent Bit:
+---
+
+## Step 8: Install Fluent Bit with Helm
+
 ```bash
-helm install fluent-bit fluent/fluent-bit \
-  --namespace logging \
-  --values fluent-bit-values.yaml
+helm install $FLUENTBIT_RELEASE $FLUENTBIT_CHART \
+  --namespace $LOGGING_NAMESPACE \     # `Target namespace`
+  --values fluent-bit-values.yaml      # `Helm values file`
 ```
 
-### 5. Verify Fluent Bit Installation
+---
+
+## Step 9: Verify Fluent Bit Installation
+
 ```bash
-# Check DaemonSet
-kubectl get daemonset fluent-bit -n logging
-
-# Check pods (one per node)
-kubectl get pods -n logging -l app.kubernetes.io/name=fluent-bit
-
-# View logs
-kubectl logs -n logging -l app.kubernetes.io/name=fluent-bit --tail=50
+kubectl logs \
+  --namespace $LOGGING_NAMESPACE \
+  --selector app.kubernetes.io/name=fluent-bit \
+  --tail=50
 ```
 
-### 6. Deploy Test Applications for Logging
-Create apps with different log formats:
+---
 
-**JSON logging app:**
-```yaml
+## Step 10: Deploy Test Applications
+
+Deploy JSON logger:
+```bash
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: json-logger
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
   replicas: 2
   selector:
@@ -197,18 +302,20 @@ spec:
         - -c
         - |
           while true; do
-            echo "{\"timestamp\":\"$(date -Iseconds)\",\"level\":\"info\",\"message\":\"Application running\",\"request_id\":\"$RANDOM\"}"
+            echo "{\"timestamp\":\"\$(date -Iseconds)\",\"level\":\"info\",\"message\":\"Application running\",\"request_id\":\"\$RANDOM\"}"
             sleep 5
           done
+EOF
 ```
 
-**Plain text logger:**
-```yaml
+Deploy plain text logger:
+```bash
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: text-logger
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
   replicas: 1
   selector:
@@ -227,20 +334,22 @@ spec:
         - -c
         - |
           while true; do
-            echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Processing request $RANDOM"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] High memory usage detected"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] Connection timeout to database"
+            echo "\$(date '+%Y-%m-%d %H:%M:%S') [INFO] Processing request \$RANDOM"
+            echo "\$(date '+%Y-%m-%d %H:%M:%S') [WARN] High memory usage detected"
+            echo "\$(date '+%Y-%m-%d %H:%M:%S') [ERROR] Connection timeout to database"
             sleep 10
           done
+EOF
 ```
 
-**Multi-line logging app:**
-```yaml
+Deploy multi-line logger (Python tracebacks):
+```bash
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: multiline-logger
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
   replicas: 1
   selector:
@@ -266,23 +375,20 @@ spec:
               except Exception:
                   print(traceback.format_exc())
               time.sleep(15)
+EOF
 ```
 
-Apply all:
-```bash
-kubectl apply -f json-logger.yaml
-kubectl apply -f text-logger.yaml
-kubectl apply -f multiline-logger.yaml
-```
+---
 
-### 7. Verify Logs in Log Analytics
-Wait 5-10 minutes for log ingestion, then query in Azure Portal:
+## Step 12: Query Logs in Log Analytics
 
-**Query container logs:**
+Wait 5-10 minutes for log ingestion, then query in Azure Portal or via CLI.
+
+**Query container logs (last 30 minutes):**
 ```kql
 FluentBit_CL
 | where TimeGenerated > ago(30m)
-| project TimeGenerated, log_s, k8s_pod_name_s, k8s_namespace_name_s
+| project TimeGenerated, log_s, k8s_pod_name_s, k8s_namespace_name_s, cluster_name_s
 | order by TimeGenerated desc
 | take 100
 ```
@@ -299,16 +405,72 @@ FluentBit_CL
 ```kql
 FluentBit_CL
 | where log_s contains "ERROR" or log_s contains "error"
-| project TimeGenerated, log_s, k8s_pod_name_s
+| project TimeGenerated, log_s, k8s_pod_name_s, k8s_namespace_name_s
 | order by TimeGenerated desc
 ```
 
-### 8. Configure Structured Logging
-Update Fluent Bit to parse JSON logs:
+**Top pods by log volume:**
+```kql
+FluentBit_CL
+| where TimeGenerated > ago(1h)
+| summarize LogCount = count() by k8s_pod_name_s, k8s_namespace_name_s
+| order by LogCount desc
+| take 20
+```
 
-```yaml
+**Log timeline by namespace:**
+```kql
+FluentBit_CL
+| where TimeGenerated > ago(24h)
+| summarize LogCount = count() by bin(TimeGenerated, 1h), k8s_namespace_name_s
+| render timechart
+```
+
+**Error rate by application:**
+```kql
+FluentBit_CL
+| where TimeGenerated > ago(6h)
+| extend IsError = iff(log_s contains "ERROR" or log_s contains "error", 1, 0)
+| summarize ErrorRate = (sum(IsError) * 100.0 / count()) by k8s_pod_name_s
+| where ErrorRate > 1
+| order by ErrorRate desc
+```
+
+---
+
+## Step 13: Configure JSON Log Parsing (Optional)
+
+Update Fluent Bit to parse JSON logs automatically:
+
+```bash
+cat <<EOF > fluent-bit-values-json-parser.yaml
 config:
+  service: |
+    [SERVICE]
+        Daemon Off
+        Flush 1
+        Log_Level info
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 5MB
+        Skip_Long_Lines On
+
   filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Labels On
+        Keep_Log Off
+
     [FILTER]
         Name parser
         Match kube.*
@@ -316,19 +478,59 @@ config:
         Parser json
         Reserve_Data On
         Preserve_Key On
+
+    [FILTER]
+        Name modify
+        Match kube.*
+        Add source_type kubernetes
+        Add cluster_name $CLUSTER_NAME
+
+  outputs: |
+    [OUTPUT]
+        Name azure
+        Match kube.*
+        Customer_ID \${WORKSPACE_ID}
+        Shared_Key \${WORKSPACE_KEY}
+        Log_Type FluentBit_CL
+        Retry_Limit 3
+
+env:
+  - name: WORKSPACE_ID
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-id
+  - name: WORKSPACE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-key
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+EOF
 ```
 
-Update Helm release:
+Upgrade Helm release:
 ```bash
-helm upgrade fluent-bit fluent/fluent-bit \
-  --namespace logging \
-  --values fluent-bit-values-updated.yaml
+helm upgrade $FLUENTBIT_RELEASE $FLUENTBIT_CHART \
+  --namespace $LOGGING_NAMESPACE \
+  --values fluent-bit-values-json-parser.yaml
 ```
 
-### 9. Add Custom Parsers
-Create custom parser configuration:
+---
 
-```yaml
+## Step 14: Add Custom Parsers (Optional)
+
+Create custom parser for timestamp and nginx logs:
+
+```bash
+cat <<EOF > fluent-bit-values-custom-parsers.yaml
 config:
   customParsers: |
     [PARSER]
@@ -348,270 +550,459 @@ config:
 
   filters: |
     [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Labels On
+
+    [FILTER]
         Name parser
         Match kube.*
         Key_Name log
         Parser custom_timestamp
         Reserve_Data On
+
+    [FILTER]
+        Name modify
+        Match kube.*
+        Add cluster_name $CLUSTER_NAME
+
+  outputs: |
+    [OUTPUT]
+        Name azure
+        Match kube.*
+        Customer_ID \${WORKSPACE_ID}
+        Shared_Key \${WORKSPACE_KEY}
+        Log_Type FluentBit_CL
+
+env:
+  - name: WORKSPACE_ID
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-id
+  - name: WORKSPACE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-key
+EOF
 ```
 
-### 10. Filter Logs by Namespace
-Exclude certain namespaces from logging:
+Apply custom parsers:
+```bash
+helm upgrade $FLUENTBIT_RELEASE $FLUENTBIT_CHART \
+  --namespace $LOGGING_NAMESPACE \
+  --values fluent-bit-values-custom-parsers.yaml
+```
 
-```yaml
+---
+
+## Step 15: Exclude Namespaces from Logging (Optional)
+
+Exclude `kube-system` namespace from log forwarding:
+
+```bash
+cat <<EOF > fluent-bit-values-exclude-ns.yaml
 config:
   filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Labels On
+
     [FILTER]
         Name grep
         Match kube.*
         Exclude k8s_namespace_name_s kube-system
-```
 
-### 11. Add Enrichment with Metadata
-Enhance logs with additional context:
-
-```yaml
-config:
-  filters: |
     [FILTER]
         Name modify
         Match kube.*
-        Add cluster_name my-aks-cluster
-        Add environment production
-        Add region eastus
-```
+        Add cluster_name $CLUSTER_NAME
 
-### 12. Configure Log Buffering
-Add buffering for reliability:
-
-```yaml
-config:
   outputs: |
     [OUTPUT]
         Name azure
         Match kube.*
-        Customer_ID ${WORKSPACE_ID}
-        Shared_Key ${WORKSPACE_KEY}
+        Customer_ID \${WORKSPACE_ID}
+        Shared_Key \${WORKSPACE_KEY}
         Log_Type FluentBit_CL
-        Retry_Limit 3
+
+env:
+  - name: WORKSPACE_ID
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-id
+  - name: WORKSPACE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-key
+EOF
 ```
 
-### 13. Monitor Fluent Bit Metrics
-Expose Fluent Bit metrics:
+---
 
+## Step 16: Monitor Fluent Bit Metrics
+
+Expose Fluent Bit metrics endpoint:
 ```bash
-kubectl port-forward -n logging svc/fluent-bit 2020:2020
+kubectl port-forward \
+  --namespace $LOGGING_NAMESPACE \
+  svc/$FLUENTBIT_RELEASE 2020:2020
 ```
 
-Access metrics at: http://localhost:2020/api/v1/metrics
+Access metrics at: `http://localhost:2020/api/v1/metrics`
 
-Sample metrics:
+Query Prometheus-format metrics:
 ```bash
 curl http://localhost:2020/api/v1/metrics/prometheus
 ```
 
-### 14. Create Alerts Based on Logs
-In Log Analytics, create alert rule:
+---
 
-```kql
-FluentBit_CL
-| where log_s contains "ERROR"
-| summarize ErrorCount = count() by bin(TimeGenerated, 5m), k8s_pod_name_s
-| where ErrorCount > 10
-```
+## Step 17: Create Log-Based Alerts
 
-Via CLI:
+Create alert rule for high error rates:
+
 ```bash
 az monitor scheduled-query create \
-  --name "High-Error-Rate" \
-  --resource-group <resource-group> \
-  --scopes $WORKSPACE_ID \
-  --condition "count 'FluentBit_CL' > 10" \
-  --condition-query "
-    FluentBit_CL
-    | where log_s contains 'ERROR'
-    | summarize AggregatedValue = count() by bin(TimeGenerated, 5m)
-  " \
-  --description "Alert when error count exceeds threshold" \
-  --evaluation-frequency 5m \
-  --window-size 15m \
-  --severity 2
+  --name "High-Error-Rate-Alert" \                        # `Alert rule name`
+  --resource-group $RESOURCE_GROUP \                      # `Resource group`
+  --scopes $(az monitor log-analytics workspace show --resource-group $RESOURCE_GROUP --workspace-name $WORKSPACE_NAME --query id -o tsv) \  # `Log Analytics workspace resource ID`
+  --condition "count > 10" \                              # `Alert threshold`
+  --condition-query "FluentBit_CL | where log_s contains 'ERROR' | summarize AggregatedValue = count()" \  # `KQL query`
+  --description "Alert when error count exceeds 10 in 5 minutes" \  # `Alert description`
+  --evaluation-frequency 5 \                              # `Evaluate every 5 minutes`
+  --window-size 15 \                                      # `Query time window 15 minutes`
+  --severity 2                                            # `Severity level (2 = Warning)`
 ```
 
-### 15. Configure Log Sampling
-Sample logs to reduce volume:
+---
 
-```yaml
+## Step 18: Configure Log Sampling (Optional)
+
+Sample logs to reduce volume (keep only 10%):
+
+```bash
+cat <<EOF > fluent-bit-values-sampling.yaml
 config:
   filters: |
     [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Labels On
+
+    [FILTER]
         Name sampling
         Match kube.*
-        Percentage 10  # Sample 10% of logs
-```
+        Percentage 10
 
-### 16. Send Logs to Multiple Destinations
-Add additional outputs:
+    [FILTER]
+        Name modify
+        Match kube.*
+        Add cluster_name $CLUSTER_NAME
 
-```yaml
-config:
   outputs: |
     [OUTPUT]
         Name azure
         Match kube.*
-        Customer_ID ${WORKSPACE_ID}
-        Shared_Key ${WORKSPACE_KEY}
+        Customer_ID \${WORKSPACE_ID}
+        Shared_Key \${WORKSPACE_KEY}
         Log_Type FluentBit_CL
 
-    [OUTPUT]
-        Name stdout
-        Match kube.*
-        Format json_lines
-
-    # [OUTPUT]
-    #     Name es
-    #     Match kube.*
-    #     Host elasticsearch.logging.svc
-    #     Port 9200
-    #     Index fluent-bit
+env:
+  - name: WORKSPACE_ID
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-id
+  - name: WORKSPACE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: log-analytics-secret
+        key: workspace-key
+EOF
 ```
 
-### 17. Query Advanced Log Analytics
-**Top pods by log volume:**
-```kql
-FluentBit_CL
-| where TimeGenerated > ago(1h)
-| summarize LogCount = count() by k8s_pod_name_s, k8s_namespace_name_s
-| order by LogCount desc
-| take 20
-```
+---
 
-**Log timeline:**
-```kql
-FluentBit_CL
-| where TimeGenerated > ago(24h)
-| summarize LogCount = count() by bin(TimeGenerated, 1h), k8s_namespace_name_s
-| render timechart
-```
+## Step 19: Configure Log Retention
 
-**Error rate by application:**
-```kql
-FluentBit_CL
-| where TimeGenerated > ago(6h)
-| extend IsError = iff(log_s contains "ERROR" or log_s contains "error", 1, 0)
-| summarize ErrorRate = (sum(IsError) * 100.0 / count()) by k8s_pod_name_s
-| where ErrorRate > 1
-| order by ErrorRate desc
-```
-
-### 18. Configure Log Rotation and Retention
-Update Log Analytics retention:
+Update Log Analytics workspace retention:
 
 ```bash
 az monitor log-analytics workspace update \
-  --resource-group <workspace-resource-group> \
-  --workspace-name <workspace-name> \
-  --retention-time 90  # Days
+  --resource-group $RESOURCE_GROUP \
+  --workspace-name $WORKSPACE_NAME \
+  --retention-time 90                   # `Retention in days (30-730)`
 ```
 
-### 19. Troubleshoot Fluent Bit
-Check Fluent Bit status:
+---
 
-```bash
-# View DaemonSet status
-kubectl describe daemonset fluent-bit -n logging
+## Step 20: Export Logs for Compliance
 
-# Check pod logs for errors
-kubectl logs -n logging -l app.kubernetes.io/name=fluent-bit --tail=100
-
-# Check configuration
-kubectl exec -n logging -it $(kubectl get pod -n logging -l app.kubernetes.io/name=fluent-bit -o jsonpath='{.items[0].metadata.name}') -- cat /fluent-bit/etc/fluent-bit.conf
-```
-
-Common issues and fixes:
-```bash
-# If logs not appearing, check output configuration
-kubectl logs -n logging -l app.kubernetes.io/name=fluent-bit | grep -i error
-
-# Verify connectivity to Log Analytics
-kubectl exec -n logging -it $(kubectl get pod -n logging -l app.kubernetes.io/name=fluent-bit -o jsonpath='{.items[0].metadata.name}') -- nc -zv ods.opinsights.azure.com 443
-```
-
-### 20. Export Logs for Compliance
 Export logs from Log Analytics:
 
 ```bash
-# Query and export to CSV
 az monitor log-analytics query \
-  --workspace $WORKSPACE_ID \
-  --analytics-query "
-    FluentBit_CL
-    | where TimeGenerated > ago(7d)
-    | project TimeGenerated, log_s, k8s_pod_name_s, k8s_namespace_name_s
-  " \
-  --output table > exported_logs.csv
+  --workspace $WORKSPACE_ID \                            # `Log Analytics workspace ID`
+  --analytics-query "FluentBit_CL | where TimeGenerated > ago(7d) | project TimeGenerated, log_s, k8s_pod_name_s, k8s_namespace_name_s" \  # `KQL export query`
+  --output json > exported_logs.json                     # `Export to JSON file`
 ```
+
+---
 
 ## Expected Results
-- Fluent Bit DaemonSet running on all nodes
-- Container logs forwarded to Log Analytics
-- Logs queryable with KQL in Azure Portal
-- Kubernetes metadata enriched in logs
-- Structured JSON logs parsed correctly
-- Multi-line logs handled properly
-- Alerts triggered based on log patterns
-- Metrics exposed for Fluent Bit monitoring
+
+After completing this lab, you should have:
+
+- ✅ Fluent Bit DaemonSet running on all AKS nodes
+- ✅ Container logs forwarded to Log Analytics workspace
+- ✅ Logs queryable with KQL in Azure Portal
+- ✅ Kubernetes metadata (pod name, namespace, labels) enriched in logs
+- ✅ JSON logs parsed into structured fields
+- ✅ Multi-line logs (Python tracebacks) handled correctly
+- ✅ Log-based alerts configured and functional
+- ✅ Fluent Bit metrics exposed via HTTP endpoint
+- ✅ Custom parsers and filters applied
+- ✅ Log retention policies configured
+
+---
 
 ## Cleanup
+
+### Option 1: Delete Lab Resources Only
+
+Delete test applications:
 ```bash
-# Delete test applications
-kubectl delete deployment json-logger text-logger multiline-logger
-
-# Uninstall Fluent Bit
-helm uninstall fluent-bit -n logging
-
-# Delete namespace
-kubectl delete namespace logging
+kubectl delete deployment json-logger text-logger multiline-logger \
+  --namespace $APP_NAMESPACE
 ```
 
-## Key Takeaways
-- **Fluent Bit** is lightweight log forwarder (vs Fluentd)
-- **DaemonSet** ensures log collection from all nodes
-- **Tail input** reads container logs from `/var/log/containers/`
-- **Kubernetes filter** enriches logs with pod metadata
-- **Azure output** sends logs to Log Analytics
-- Parsers extract structured data from unstructured logs
-- Filters transform and enrich log data
-- Buffering provides reliability during network issues
-- Multiple outputs enable sending logs to different destinations
+Uninstall Fluent Bit:
+```bash
+helm uninstall $FLUENTBIT_RELEASE \
+  --namespace $LOGGING_NAMESPACE
+```
 
-## Fluent Bit vs Fluentd
+Delete logging namespace:
+```bash
+kubectl delete namespace $LOGGING_NAMESPACE
+```
+
+Delete Log Analytics workspace:
+```bash
+az monitor log-analytics workspace delete \
+  --resource-group $RESOURCE_GROUP \
+  --workspace-name $WORKSPACE_NAME \
+  --yes
+```
+
+### Option 2: Delete Entire Resource Group
+
+Delete all resources including AKS cluster:
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait
+```
+
+Clean up local kubeconfig:
+```bash
+kubectl config delete-context $CLUSTER_NAME
+```
+
+---
+
+## How This Connects to Azure Kubernetes Observability
+
+### Fluent Bit Architecture in AKS
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     AKS Cluster                              │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
+│  │  Node 1  │  │  Node 2  │  │  Node 3  │                  │
+│  │          │  │          │  │          │                  │
+│  │  ┌────┐  │  │  ┌────┐  │  │  ┌────┐  │                  │
+│  │  │Pod │  │  │  │Pod │  │  │  │Pod │  │  Application     │
+│  │  └────┘  │  │  └────┘  │  │  └────┘  │  Containers      │
+│  │    │     │  │    │     │  │    │     │                  │
+│  │    ▼     │  │    ▼     │  │    ▼     │                  │
+│  │ stdout   │  │ stdout   │  │ stdout   │                  │
+│  │ stderr   │  │ stderr   │  │ stderr   │                  │
+│  │    │     │  │    │     │  │    │     │                  │
+│  │    ▼     │  │    ▼     │  │    ▼     │                  │
+│  │ /var/log/containers/*.log  │  CRI-O/  │                  │
+│  │    │     │  │    │     │  │containerd│                  │
+│  │    ▼     │  │    ▼     │  │    ▼     │                  │
+│  │┌────────┐│  │┌────────┐│  │┌────────┐│  Fluent Bit     │
+│  ││Fluent  ││  ││Fluent  ││  ││Fluent  ││  DaemonSet      │
+│  ││Bit Pod ││  ││Bit Pod ││  ││Bit Pod ││  (one per node) │
+│  │└────────┘│  │└────────┘│  │└────────┘│                  │
+│  │    │     │  │    │     │  │    │     │                  │
+│  └────┼─────┘  └────┼─────┘  └────┼─────┘                  │
+│       │             │             │                         │
+│       └─────────────┴─────────────┘                         │
+│                     │                                        │
+└─────────────────────┼────────────────────────────────────────┘
+                      │
+                      │ HTTPS (TLS)
+                      │ Azure Output Plugin
+                      ▼
+        ┌──────────────────────────┐
+        │  Log Analytics Workspace │
+        │                          │
+        │  FluentBit_CL Table      │
+        │  - log_s                 │
+        │  - k8s_pod_name_s        │
+        │  - k8s_namespace_name_s  │
+        │  - k8s_labels            │
+        │  - cluster_name_s        │
+        │  - TimeGenerated         │
+        └──────────────────────────┘
+                      │
+                      ▼
+        ┌──────────────────────────┐
+        │   Azure Portal / KQL     │
+        │   - Queries              │
+        │   - Dashboards           │
+        │   - Alerts               │
+        └──────────────────────────┘
+```
+
+### Fluent Bit Components
+
+| Component | Description | Configuration |
+|-----------|-------------|---------------|
+| **INPUT** | Source of log data | `tail` (reads `/var/log/containers/*.log`), `systemd` |
+| **FILTER** | Transform/enrich logs | `kubernetes` (metadata), `parser` (JSON), `modify` (add fields), `grep` (filter) |
+| **OUTPUT** | Destination for logs | `azure` (Log Analytics), `stdout`, `elasticsearch` |
+| **PARSER** | Extract structured data | `json`, `regex`, `logfmt` |
+
+### Fluent Bit vs Fluentd
 
 | Feature | Fluent Bit | Fluentd |
 |---------|-----------|---------|
-| Memory footprint | ~450KB | ~40MB |
-| Language | C | Ruby/C |
-| Performance | Higher | Good |
-| Plugins | 70+ | 500+ |
-| Use case | Edge/aggregator | Central aggregator |
-| Best for | Node-level | Cluster-level |
+| **Memory Footprint** | ~450KB | ~40MB |
+| **Language** | C (compiled) | Ruby/C (interpreted) |
+| **Performance** | Higher throughput | Good |
+| **Plugins** | 70+ built-in | 500+ community |
+| **Configuration** | INI-style | Ruby DSL |
+| **Use Case** | Edge/node-level | Central aggregator |
+| **Best For** | DaemonSet on nodes | Centralized processing |
+| **Multi-line Support** | Built-in parsers | Requires plugins |
 
-## Common Fluent Bit Filters
+### Common Fluent Bit Filters
 
-| Filter | Purpose |
-|--------|---------|
-| `kubernetes` | Add K8s metadata |
-| `parser` | Parse log formats |
-| `grep` | Include/exclude logs |
-| `modify` | Add/remove fields |
-| `nest` | Restructure JSON |
-| `rewrite_tag` | Route based on content |
+| Filter | Purpose | Example Use Case |
+|--------|---------|------------------|
+| `kubernetes` | Enrich with K8s metadata | Add pod name, namespace, labels |
+| `parser` | Parse log formats | Extract JSON fields from log string |
+| `grep` | Include/exclude logs | Filter out kube-system logs |
+| `modify` | Add/remove/rename fields | Add cluster name to all logs |
+| `nest` | Restructure JSON | Flatten nested Kubernetes metadata |
+| `rewrite_tag` | Route based on content | Send ERROR logs to different destination |
+| `throttle` | Rate limiting | Limit high-volume logs |
+| `lua` | Custom transformations | Complex field manipulation |
+
+### Log Analytics Integration
+
+**FluentBit_CL Table Schema:**
+- `log_s`: Raw log message
+- `k8s_pod_name_s`: Pod name (from Kubernetes filter)
+- `k8s_namespace_name_s`: Namespace (from Kubernetes filter)
+- `k8s_container_name_s`: Container name
+- `k8s_labels`: Pod labels (JSON)
+- `cluster_name_s`: Cluster identifier (from modify filter)
+- `source_type_s`: "kubernetes" (from modify filter)
+- `TimeGenerated`: Log ingestion timestamp
+
+**Query Performance Tips:**
+1. Always filter by `TimeGenerated` first
+2. Use `where` before `project` for efficiency
+3. Index commonly queried fields
+4. Use `summarize` to aggregate large result sets
+5. Leverage `materialize()` for repeated subqueries
+
+---
+
+## Key Takeaways
+
+- **Fluent Bit DaemonSet** ensures log collection from every node without impacting application performance
+- **Tail Input** reads container logs from `/var/log/containers/` written by container runtime (containerd/CRI-O)
+- **Kubernetes Filter** enriches logs with pod metadata (name, namespace, labels) via API server queries
+- **Azure Output Plugin** sends logs to Log Analytics using shared key authentication
+- **Parsers** extract structured data from unstructured log strings (JSON, regex patterns)
+- **Multi-line Support** handles stack traces and complex log formats using `multiline.parser`
+- **Buffering** provides reliability during network issues with `Retry_Limit`
+- **Filters** enable transformation (add fields), filtering (exclude namespaces), and routing (conditional outputs)
+- **Custom Parsers** support application-specific log formats (nginx, Apache, custom timestamp formats)
+- **Multiple Outputs** allow sending logs to Log Analytics, Elasticsearch, stdout, or S3 simultaneously
+- **Sampling** reduces log volume and costs while maintaining statistical accuracy
+- **Log Analytics** provides centralized search, KQL queries, dashboards, and alerting
+- **Metrics Endpoint** exposes Fluent Bit health and performance metrics in Prometheus format
+
+### When to Use Fluent Bit vs Container Insights
+
+| Scenario | Fluent Bit | Container Insights |
+|----------|------------|-------------------|
+| **Custom parsing** | ✅ Full control | ❌ Limited |
+| **Multiple outputs** | ✅ Yes (Azure, ES, S3) | ❌ Only Log Analytics |
+| **Cost optimization** | ✅ Sampling, filtering | ⚠️ Ingestion-based pricing |
+| **Ease of setup** | ⚠️ Helm + configuration | ✅ One-click addon |
+| **Performance metrics** | ❌ Requires separate tools | ✅ Built-in (Prometheus) |
+| **Application logs** | ✅ Primary use case | ✅ Supported |
+| **Resource metrics** | ❌ Not supported | ✅ CPU, memory, disk |
+
+**Recommendation**: Use **Container Insights** for resource metrics + performance monitoring. Use **Fluent Bit** for advanced log processing, custom parsing, and multi-destination forwarding.
+
+---
 
 ## Troubleshooting
-- **No logs appearing**: Check Fluent Bit pod logs for errors
-- **High memory usage**: Reduce Mem_Buf_Limit or enable buffering
-- **Missing metadata**: Verify kubernetes filter is configured
-- **Permission denied**: Check serviceaccount and RBAC
+
+### No Logs Appearing in Log Analytics
+
+Check Fluent Bit pod logs:
+```bash
+kubectl logs \
+  --namespace $LOGGING_NAMESPACE \
+  --selector app.kubernetes.io/name=fluent-bit \
+  --tail=100
+```
+
+### High Memory Usage
+
+**Reduce memory buffer limit:**
+```yaml
+Mem_Buf_Limit 1MB  # Default is 5MB
+```
+
+**Enable disk buffering:**
+```yaml
+[INPUT]
+    Name tail
+    Path /var/log/containers/*.log
+    DB /var/log/fluentbit.db
+```
+
+### Missing Kubernetes Metadata
+
+Verify RBAC permissions:
+```bash
+kubectl get clusterrolebinding | grep fluent-bit
+```
+
+### Logs Not Parsed Correctly
+
+Check Fluent Bit parser configuration in Helm values and verify JSON format matches parser regex patterns.
 
 ---
 
