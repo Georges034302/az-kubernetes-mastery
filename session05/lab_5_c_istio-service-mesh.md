@@ -1,4 +1,5 @@
 # Lab 5c: Istio Service Mesh Setup
+<img width="1536" height="844" alt="ZIMAGE" src="https://github.com/user-attachments/assets/d5a2e23e-7f70-492f-bfa9-0fa9b7aed819" />
 
 ## Objective
 Learn to set up and configure Istio service mesh on AKS for advanced traffic management, security, and observability of microservices.
