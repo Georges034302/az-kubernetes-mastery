@@ -1,4 +1,5 @@
 # Lab 4c: Fluent Bit Central Logging
+![IMG](https://github.com/user-attachments/assets/101d36eb-3a70-4c00-ac55-89abbc78cfa6)
 
 ## Objective
 Forward AKS container logs to Log Analytics using Fluent Bit for centralized monitoring, enrichment, parsing, and search.
