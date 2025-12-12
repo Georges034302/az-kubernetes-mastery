@@ -1,4 +1,5 @@
 # Lab 3b: Pod Security Admission - Deny Privileged Pods
+![ZIMAGE](https://github.com/user-attachments/assets/48f1b7df-6943-4975-a7bf-76557e44d6e8)
 
 ## Objective
 Enforce **Pod Security Admission (PSA)** to block privileged or insecure pods using the **Baseline** and **Restricted** Pod Security Standards. This lab demonstrates production-grade pod hardening and security policy enforcement in AKS.
