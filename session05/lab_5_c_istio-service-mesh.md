@@ -1,547 +1,235 @@
 # Lab 5c: Istio Service Mesh Setup
 
 ## Objective
-Set up Istio service mesh on AKS for traffic management and observability.
+Learn to set up and configure Istio service mesh on AKS for advanced traffic management, security, and observability of microservices.
 
 ## Prerequisites
-- AKS cluster running
-- `kubectl` configured
+- Azure CLI installed and authenticated
+- `kubectl` installed
 - Helm 3 installed
-- Cluster with at least 8GB memory available
+- Basic understanding of Kubernetes services and networking
+- At least 8GB free memory for Istio components
 
-## Steps
+---
 
-### 1. Download and Install Istio
+## Lab Parameters
+
 ```bash
-# Download Istio
-curl -L https://istio.io/downloadIstio | sh -
+# Resource and location settings
+RESOURCE_GROUP="rg-aks-istio-lab"
+LOCATION="australiaeast"  # Sydney, Australia
 
-# Move to Istio directory
-cd istio-*
+# AKS cluster settings
+CLUSTER_NAME="aks-istio-lab"
+NODE_COUNT=3
+NODE_SIZE="Standard_D4s_v3"  # 4 vCPU, 16GB RAM (required for Istio)
+K8S_VERSION="1.29"
 
-# Add istioctl to PATH
-export PATH=$PWD/bin:$PATH
+# Istio settings
+ISTIO_VERSION="1.20.2"
+ISTIO_PROFILE="demo"  # demo, default, or production
+ISTIO_NS="istio-system"
 
-# Verify installation
-istioctl version
+# Application settings
+APP_NS="demo"
+BOOKINFO_VERSION="1.18.0"
 ```
 
-### 2. Install Istio on AKS
+---
+
+## Step 1: Create Resource Group
+
 ```bash
-# Install Istio with demo profile
-istioctl install --set profile=demo -y
-
-# For production, use:
-# istioctl install --set profile=production -y
-
-# Verify installation
-kubectl get pods -n istio-system
-
-# Check Istio components
-kubectl get svc -n istio-system
+az group create \
+  --name $RESOURCE_GROUP \              # `Resource group name`
+  --location $LOCATION                  # `Azure region`
 ```
 
-### 3. Enable Automatic Sidecar Injection
+---
+
+## Step 2: Create AKS Cluster
+
 ```bash
-# Label namespace for automatic injection
-kubectl create namespace demo
-kubectl label namespace demo istio-injection=enabled
-
-# Verify label
-kubectl get namespace demo --show-labels
+az aks create \
+  --resource-group $RESOURCE_GROUP \            # `Resource group`
+  --name $CLUSTER_NAME \                        # `Cluster name`
+  --location $LOCATION \                        # `Azure region`
+  --node-count $NODE_COUNT \                    # `Number of nodes`
+  --node-vm-size $NODE_SIZE \                   # `VM size (4 vCPU, 16GB for Istio)`
+  --kubernetes-version $K8S_VERSION \           # `Kubernetes version`
+  --network-plugin azure \                      # `Azure CNI networking`
+  --enable-managed-identity \                   # `Use managed identity`
+  --generate-ssh-keys                           # `Generate SSH keys`
 ```
 
-### 4. Deploy Sample Application
-Create `bookinfo-app.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: productpage
-  namespace: demo
-  labels:
-    app: productpage
-    service: productpage
-spec:
-  ports:
-  - port: 9080
-    name: http
-  selector:
-    app: productpage
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: productpage-v1
-  namespace: demo
-  labels:
-    app: productpage
-    version: v1
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: productpage
-      version: v1
-  template:
-    metadata:
-      labels:
-        app: productpage
-        version: v1
-    spec:
-      serviceAccountName: bookinfo-productpage
-      containers:
-      - name: productpage
-        image: docker.io/istio/examples-bookinfo-productpage-v1:1.18.0
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 9080
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        securityContext:
-          runAsUser: 1000
-      volumes:
-      - name: tmp
-        emptyDir: {}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: bookinfo-productpage
-  namespace: demo
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: details
-  namespace: demo
-  labels:
-    app: details
-    service: details
-spec:
-  ports:
-  - port: 9080
-    name: http
-  selector:
-    app: details
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: details-v1
-  namespace: demo
-  labels:
-    app: details
-    version: v1
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: details
-      version: v1
-  template:
-    metadata:
-      labels:
-        app: details
-        version: v1
-    spec:
-      serviceAccountName: bookinfo-details
-      containers:
-      - name: details
-        image: docker.io/istio/examples-bookinfo-details-v1:1.18.0
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 9080
-        securityContext:
-          runAsUser: 1000
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: bookinfo-details
-  namespace: demo
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: reviews
-  namespace: demo
-  labels:
-    app: reviews
-    service: reviews
-spec:
-  ports:
-  - port: 9080
-    name: http
-  selector:
-    app: reviews
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: reviews-v1
-  namespace: demo
-  labels:
-    app: reviews
-    version: v1
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: reviews
-      version: v1
-  template:
-    metadata:
-      labels:
-        app: reviews
-        version: v1
-    spec:
-      serviceAccountName: bookinfo-reviews
-      containers:
-      - name: reviews
-        image: docker.io/istio/examples-bookinfo-reviews-v1:1.18.0
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: LOG_DIR
-          value: "/tmp/logs"
-        ports:
-        - containerPort: 9080
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        - name: wlp-output
-          mountPath: /opt/ibm/wlp/output
-        securityContext:
-          runAsUser: 1000
-      volumes:
-      - name: wlp-output
-        emptyDir: {}
-      - name: tmp
-        emptyDir: {}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: reviews-v2
-  namespace: demo
-  labels:
-    app: reviews
-    version: v2
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: reviews
-      version: v2
-  template:
-    metadata:
-      labels:
-        app: reviews
-        version: v2
-    spec:
-      serviceAccountName: bookinfo-reviews
-      containers:
-      - name: reviews
-        image: docker.io/istio/examples-bookinfo-reviews-v2:1.18.0
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: LOG_DIR
-          value: "/tmp/logs"
-        ports:
-        - containerPort: 9080
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        - name: wlp-output
-          mountPath: /opt/ibm/wlp/output
-        securityContext:
-          runAsUser: 1000
-      volumes:
-      - name: wlp-output
-        emptyDir: {}
-      - name: tmp
-        emptyDir: {}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: reviews-v3
-  namespace: demo
-  labels:
-    app: reviews
-    version: v3
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: reviews
-      version: v3
-  template:
-    metadata:
-      labels:
-        app: reviews
-        version: v3
-    spec:
-      serviceAccountName: bookinfo-reviews
-      containers:
-      - name: reviews
-        image: docker.io/istio/examples-bookinfo-reviews-v3:1.18.0
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: LOG_DIR
-          value: "/tmp/logs"
-        ports:
-        - containerPort: 9080
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
-        - name: wlp-output
-          mountPath: /opt/ibm/wlp/output
-        securityContext:
-          runAsUser: 1000
-      volumes:
-      - name: wlp-output
-        emptyDir: {}
-      - name: tmp
-        emptyDir: {}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: bookinfo-reviews
-  namespace: demo
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ratings
-  namespace: demo
-  labels:
-    app: ratings
-    service: ratings
-spec:
-  ports:
-  - port: 9080
-    name: http
-  selector:
-    app: ratings
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ratings-v1
-  namespace: demo
-  labels:
-    app: ratings
-    version: v1
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: ratings
-      version: v1
-  template:
-    metadata:
-      labels:
-        app: ratings
-        version: v1
-    spec:
-      serviceAccountName: bookinfo-ratings
-      containers:
-      - name: ratings
-        image: docker.io/istio/examples-bookinfo-ratings-v1:1.18.0
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 9080
-        securityContext:
-          runAsUser: 1000
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: bookinfo-ratings
-  namespace: demo
-```
-
-Deploy:
+Get credentials:
 ```bash
-kubectl apply -f bookinfo-app.yaml
-
-# Verify pods have sidecar injected (2/2 containers)
-kubectl get pods -n demo
-
-# Check services
-kubectl get svc -n demo
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing  # `Merge credentials to kubeconfig`
 ```
 
-### 5. Create Istio Gateway
-Create `bookinfo-gateway.yaml`:
-
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: Gateway
-metadata:
-  name: bookinfo-gateway
-  namespace: demo
-spec:
-  selector:
-    istio: ingressgateway
-  servers:
-  - port:
-      number: 80
-      name: http
-      protocol: HTTP
-    hosts:
-    - "*"
 ---
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: bookinfo
-  namespace: demo
-spec:
-  hosts:
-  - "*"
-  gateways:
-  - bookinfo-gateway
-  http:
-  - match:
-    - uri:
-        exact: /productpage
-    - uri:
-        prefix: /static
-    - uri:
-        exact: /login
-    - uri:
-        exact: /logout
-    - uri:
-        prefix: /api/v1/products
-    route:
-    - destination:
-        host: productpage
-        port:
-          number: 9080
-```
 
-Apply:
+## Step 3: Download and Install Istio CLI
+
+Download Istio:
 ```bash
-kubectl apply -f bookinfo-gateway.yaml
-
-# Get ingress gateway external IP
-kubectl get svc istio-ingressgateway -n istio-system
-
-export INGRESS_HOST=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-export INGRESS_PORT=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
-export GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
-
-echo "Gateway URL: http://$GATEWAY_URL/productpage"
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=$ISTIO_VERSION sh -  # `Download specific Istio version`
 ```
 
-### 6. Configure Traffic Management - Destination Rules
-Create `destination-rules.yaml`:
-
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: productpage
-  namespace: demo
-spec:
-  host: productpage
-  subsets:
-  - name: v1
-    labels:
-      version: v1
----
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: reviews
-  namespace: demo
-spec:
-  host: reviews
-  trafficPolicy:
-    loadBalancer:
-      simple: RANDOM
-  subsets:
-  - name: v1
-    labels:
-      version: v1
-  - name: v2
-    labels:
-      version: v2
-  - name: v3
-    labels:
-      version: v3
----
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: ratings
-  namespace: demo
-spec:
-  host: ratings
-  subsets:
-  - name: v1
-    labels:
-      version: v1
----
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: details
-  namespace: demo
-spec:
-  host: details
-  subsets:
-  - name: v1
-    labels:
-      version: v1
-```
-
-Apply:
+Navigate to Istio directory:
 ```bash
-kubectl apply -f destination-rules.yaml
+cd istio-$ISTIO_VERSION  # `Change to Istio directory`
 ```
 
-### 7. Implement Traffic Splitting
+Add istioctl to PATH:
+```bash
+export PATH=$PWD/bin:$PATH  # `Add istioctl to PATH`
+```
+
+Verify installation:
+```bash
+istioctl version  # `Show istioctl version`
+```
+
+---
+
+## Step 4: Install Istio Control Plane
+
+Install Istio:
+```bash
+istioctl install \
+  --set profile=$ISTIO_PROFILE \  # `Install profile (demo includes all features)`
+  -y                               # `Auto-approve installation`
+```
+
+Verify Istio installation:
+```bash
+kubectl get pods --namespace $ISTIO_NS  # `List Istio control plane pods`
+kubectl get svc --namespace $ISTIO_NS   # `Show Istio services`
+```
+
+---
+
+## Step 5: Enable Automatic Sidecar Injection
+
+Create application namespace:
+```bash
+kubectl create namespace $APP_NS  # `Create demo namespace`
+```
+
+Enable sidecar injection:
+```bash
+kubectl label namespace $APP_NS istio-injection=enabled  # `Enable automatic sidecar injection`
+```
+
+Verify namespace label:
+```bash
+kubectl get namespace $APP_NS --show-labels  # `Show namespace labels`
+```
+
+---
+
+## Step 6: Deploy Bookinfo Sample Application
+
+Deploy the Bookinfo application using Istio's official sample:
+```bash
+kubectl apply \
+  --namespace $APP_NS \                         # `Target namespace`
+  -f samples/bookinfo/platform/kube/bookinfo.yaml  # `Bookinfo application manifests`
+```
+
+Verify deployment (pods should have 2/2 containers - app + sidecar):
+```bash
+kubectl get pods --namespace $APP_NS  # `List pods with sidecar proxies`
+kubectl get svc --namespace $APP_NS   # `Show application services`
+```
+
+---
+
+## Step 7: Create Istio Gateway
+
+Deploy Istio Gateway for external access:
+```bash
+kubectl apply \
+  --namespace $APP_NS \                          # `Target namespace`
+  -f samples/bookinfo/networking/bookinfo-gateway.yaml  # `Gateway and VirtualService`
+```
+
+Verify Gateway creation:
+```bash
+kubectl get gateway --namespace $APP_NS         # `Show Istio Gateway`
+kubectl get virtualservice --namespace $APP_NS  # `Show VirtualService`
+```
+
+---
+
+## Step 8: Get Application URL
+
+Wait for LoadBalancer IP assignment:
+```bash
+kubectl wait --namespace $ISTIO_NS \
+  --for=jsonpath='{.status.loadBalancer.ingress}' \
+  svc/istio-ingressgateway \
+  --timeout=300s  # `Wait for external IP (max 5 minutes)`
+```
+
+Retrieve ingress gateway external IP:
+```bash
+INGRESS_HOST=$(kubectl get svc istio-ingressgateway \
+  --namespace $ISTIO_NS \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')  # `Get external IP`
+
+INGRESS_PORT=$(kubectl get svc istio-ingressgateway \
+  --namespace $ISTIO_NS \
+  -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')  # `Get HTTP port`
+
+GATEWAY_URL="$INGRESS_HOST:$INGRESS_PORT"  # `Construct gateway URL`
+
+echo "Bookinfo URL: http://$GATEWAY_URL/productpage"
+```
+
+Test application:
+```bash
+curl -s "http://$GATEWAY_URL/productpage" | grep -o "<title>.*</title>"  # `Test application endpoint`
+```
+
+---
+
+## Step 9: Configure Traffic Management
+
+Apply destination rules:
+```bash
+kubectl apply \
+  --namespace $APP_NS \                          # `Target namespace`
+  -f samples/bookinfo/networking/destination-rule-all.yaml  # `Define service subsets`
+```
+
 Route all traffic to v1:
-
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: reviews
-  namespace: demo
-spec:
-  hosts:
-  - reviews
-  http:
-  - route:
-    - destination:
-        host: reviews
-        subset: v1
-      weight: 100
-```
-
-Apply and test:
 ```bash
-kubectl apply -f reviews-v1.yaml
-
-# Access application multiple times - should only see v1 (no stars)
-curl http://$GATEWAY_URL/productpage
+kubectl apply \
+  --namespace $APP_NS \
+  -f samples/bookinfo/networking/virtual-service-all-v1.yaml  # `Route to v1 only`
 ```
 
-Split traffic 50/50 between v1 and v3:
+Verify traffic routing:
+```bash
+kubectl get virtualservice --namespace $APP_NS  # `Show virtual services`
+```
 
-```yaml
+---
+
+## Step 10: Test Traffic Splitting
+
+50/50 split between reviews v1 and v3:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: reviews
-  namespace: demo
 spec:
   hosts:
   - reviews
@@ -550,22 +238,30 @@ spec:
     - destination:
         host: reviews
         subset: v1
-      weight: 50
+      weight: 50        # 50% to v1
     - destination:
         host: reviews
         subset: v3
-      weight: 50
+      weight: 50        # 50% to v3
+EOF
 ```
 
-### 8. Header-Based Routing
-Route based on user identity:
+Test split:
+```bash
+for i in {1..10}; do curl -s "http://$GATEWAY_URL/productpage" | grep -o "glyphicon-star"; done  # `Test traffic distribution`
+```
 
-```yaml
+---
+
+## Step 11: Header-Based Routing
+
+Route based on user header:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: reviews
-  namespace: demo
 spec:
   hosts:
   - reviews
@@ -573,59 +269,53 @@ spec:
   - match:
     - headers:
         end-user:
-          exact: jason
+          exact: jason    # If user=jason
     route:
     - destination:
         host: reviews
-        subset: v2
+        subset: v2        # Route to v2
   - route:
     - destination:
         host: reviews
-        subset: v1
+        subset: v1        # Default to v1
+EOF
 ```
 
-Test:
+---
+
+## Step 12: Configure Resilience Policies
+
+Add circuit breaker to reviews service:
 ```bash
-# Login as 'jason' in the UI to see v2 (black stars)
-# Other users see v1 (no stars)
-```
-
-### 9. Implement Circuit Breaking
-Create circuit breaker policy:
-
-```yaml
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:
-  name: reviews-circuit-breaker
-  namespace: demo
+  name: reviews-resilience
 spec:
   host: reviews
   trafficPolicy:
     connectionPool:
       tcp:
-        maxConnections: 1
+        maxConnections: 1      # Max TCP connections
       http:
         http1MaxPendingRequests: 1
         maxRequestsPerConnection: 1
     outlierDetection:
-      consecutive5xxErrors: 1
+      consecutive5xxErrors: 1  # Eject after 1 error
       interval: 1s
       baseEjectionTime: 3m
       maxEjectionPercent: 100
-  subsets:
-  - name: v1
-    labels:
-      version: v1
+EOF
 ```
 
-### 10. Configure Request Timeouts
-```yaml
+Add timeout and retry policies:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
-  name: reviews-timeout
-  namespace: demo
+  name: reviews
 spec:
   hosts:
   - reviews
@@ -634,134 +324,115 @@ spec:
     - destination:
         host: reviews
         subset: v1
-    timeout: 0.5s
-```
-
-### 11. Implement Retry Logic
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: reviews-retry
-  namespace: demo
-spec:
-  hosts:
-  - reviews
-  http:
-  - route:
-    - destination:
-        host: reviews
-        subset: v1
+    timeout: 2s          # 2 second timeout
     retries:
-      attempts: 3
-      perTryTimeout: 2s
-      retryOn: 5xx
+      attempts: 3        # Retry 3 times
+      perTryTimeout: 2s  # Per-attempt timeout
+EOF
 ```
 
-### 12. Fault Injection - Delays
-Inject delay for testing:
+---
 
-```yaml
+## Step 13: Inject Faults for Testing
+
+Inject delay:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
-  name: ratings-delay
-  namespace: demo
+  name: ratings
 spec:
   hosts:
   - ratings
   http:
-  - match:
-    - headers:
-        end-user:
-          exact: jason
-    fault:
+  - fault:
       delay:
         percentage:
-          value: 100.0
-        fixedDelay: 7s
+          value: 100     # 100% of requests
+        fixedDelay: 7s   # 7 second delay
     route:
     - destination:
         host: ratings
         subset: v1
-  - route:
-    - destination:
-        host: ratings
-        subset: v1
+EOF
 ```
 
-### 13. Fault Injection - Aborts
-Inject HTTP errors:
-
-```yaml
+Inject HTTP abort (50% failure rate):
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
-  name: ratings-abort
-  namespace: demo
+  name: ratings
 spec:
   hosts:
   - ratings
   http:
-  - match:
-    - headers:
-        end-user:
-          exact: jason
-    fault:
+  - fault:
       abort:
         percentage:
-          value: 100.0
-        httpStatus: 500
+          value: 50      # 50% of requests
+        httpStatus: 500  # Return HTTP 500
     route:
     - destination:
         host: ratings
         subset: v1
-  - route:
-    - destination:
-        host: ratings
-        subset: v1
+EOF
 ```
 
-### 14. Enable mTLS
-Apply mesh-wide strict mTLS:
+Remove fault injection:
+```bash
+kubectl delete virtualservice ratings --namespace $APP_NS  # `Clean up fault injection`
+```
 
-```yaml
+---
+
+## Step 14: Enable mTLS (Mutual TLS)
+
+Enable strict mTLS for the namespace:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
   name: default
-  namespace: istio-system
 spec:
   mtls:
-    mode: STRICT
+    mode: STRICT  # Enforce mTLS for all services
+EOF
 ```
 
-Verify mTLS:
+Verify mTLS status:
 ```bash
-kubectl exec -n demo $(kubectl get pod -n demo -l app=productpage -o jsonpath='{.items[0].metadata.name}') -c istio-proxy -- curl -s http://details:9080 -v
+istioctl authn tls-check \
+  $(kubectl get pod --namespace $APP_NS -l app=productpage -o jsonpath='{.items[0].metadata.name}') \
+  productpage.$APP_NS.svc.cluster.local  # `Check TLS status`
 ```
 
-### 15. Configure Authorization Policies
-Deny all by default:
+---
 
-```yaml
+## Step 15: Configure Authorization Policies
+
+Deny all traffic by default:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: deny-all
-  namespace: demo
 spec:
-  {}
+  {}  # Empty spec = deny all
+EOF
 ```
 
-Allow specific services:
-
-```yaml
+Allow specific traffic to productpage:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: productpage-viewer
-  namespace: demo
 spec:
   selector:
     matchLabels:
@@ -770,167 +441,191 @@ spec:
   rules:
   - from:
     - source:
-        principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
----
+        principals: ["cluster.local/ns/$ISTIO_NS/sa/istio-ingressgateway-service-account"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/productpage*"]
+EOF
+```
+
+Allow productpage to call other services:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: details-viewer
-  namespace: demo
+  name: details-reviews-viewer
 spec:
-  selector:
-    matchLabels:
-      app: details
   action: ALLOW
   rules:
   - from:
     - source:
-        principals: ["cluster.local/ns/demo/sa/bookinfo-productpage"]
+        principals: ["cluster.local/ns/$APP_NS/sa/bookinfo-productpage"]
     to:
     - operation:
         methods: ["GET"]
+EOF
 ```
-
-### 16. Configure Telemetry
-Enable access logging:
-
-```yaml
-apiVersion: telemetry.istio.io/v1alpha1
-kind: Telemetry
-metadata:
-  name: mesh-default
-  namespace: istio-system
-spec:
-  accessLogging:
-  - providers:
-    - name: envoy
-```
-
-### 17. Install Observability Add-ons
-```bash
-# Install Kiali, Prometheus, Grafana, Jaeger
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/prometheus.yaml
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/grafana.yaml
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/jaeger.yaml
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/kiali.yaml
-
-# Wait for deployments
-kubectl rollout status deployment/kiali -n istio-system
-kubectl rollout status deployment/prometheus -n istio-system
-kubectl rollout status deployment/grafana -n istio-system
-```
-
-Access dashboards:
-```bash
-# Kiali
-kubectl port-forward svc/kiali -n istio-system 20001:20001
-
-# Grafana
-kubectl port-forward svc/grafana -n istio-system 3000:3000
-
-# Jaeger
-kubectl port-forward svc/tracing -n istio-system 16686:80
-
-# Prometheus
-kubectl port-forward svc/prometheus -n istio-system 9090:9090
-```
-
-### 18. Generate Traffic for Observability
-```bash
-# Generate continuous traffic
-for i in {1..1000}; do
-  curl -s http://$GATEWAY_URL/productpage > /dev/null
-  echo "Request $i"
-  sleep 0.5
-done
-```
-
-### 19. Analyze with istioctl
-```bash
-# Analyze mesh configuration
-istioctl analyze -n demo
-
-# Validate proxy configuration
-istioctl proxy-status
-
-# Get proxy config for specific pod
-POD=$(kubectl get pod -n demo -l app=productpage -o jsonpath='{.items[0].metadata.name}')
-istioctl proxy-config cluster $POD -n demo
-
-# View listeners
-istioctl proxy-config listener $POD -n demo
-
-# View routes
-istioctl proxy-config route $POD -n demo
-
-# View endpoints
-istioctl proxy-config endpoint $POD -n demo
-```
-
-### 20. Cleanup
-```bash
-# Delete sample application
-kubectl delete -f bookinfo-app.yaml
-kubectl delete -f bookinfo-gateway.yaml
-kubectl delete -f destination-rules.yaml
-
-# Delete namespace
-kubectl delete namespace demo
-
-# Uninstall Istio
-istioctl uninstall --purge -y
-
-# Delete Istio namespace
-kubectl delete namespace istio-system
-```
-
-## Expected Results
-- Istio control plane running in istio-system
-- Automatic sidecar injection in labeled namespaces
-- Traffic management with VirtualService and DestinationRule
-- mTLS enabled for service-to-service communication
-- Circuit breaking and fault injection working
-- Authorization policies enforcing access control
-- Observability dashboards showing metrics and traces
-- Distributed tracing with Jaeger
-
-## Key Takeaways
-- **Istio** provides service mesh capabilities for Kubernetes
-- **Sidecar proxy (Envoy)** intercepts all network traffic
-- **VirtualService** configures routing rules
-- **DestinationRule** defines traffic policies for subsets
-- **Gateway** manages ingress/egress traffic
-- **mTLS** encrypts service-to-service communication
-- **Circuit breaking** prevents cascading failures
-- **Fault injection** enables chaos engineering
-- **Authorization policies** control service access
-- **Observability** includes metrics, logs, and traces
-
-## Istio Components
-
-| Component | Purpose |
-|-----------|---------|
-| Istiod | Control plane (config, discovery, certs) |
-| Envoy Proxy | Sidecar data plane |
-| Ingress Gateway | Entry point to mesh |
-| Egress Gateway | Exit point from mesh |
-
-## Traffic Management Resources
-
-| Resource | Purpose |
-|----------|---------|
-| VirtualService | Routing rules |
-| DestinationRule | Traffic policies |
-| Gateway | Ingress/egress |
-| ServiceEntry | External services |
-| Sidecar | Proxy configuration |
-
-## Troubleshooting
-- **Sidecar not injected**: Check namespace label
-- **503 errors**: Verify DestinationRule subsets match labels
-- **mTLS issues**: Check PeerAuthentication policies
-- **Gateway not accessible**: Verify LoadBalancer service
-- **Use `istioctl analyze`**: Detect configuration issues
 
 ---
 
+## Step 16: Install Observability Tools
+
+Install Prometheus:
+```bash
+kubectl apply -f samples/addons/prometheus.yaml  # `Metrics collection`
+```
+
+Install Grafana:
+```bash
+kubectl apply -f samples/addons/grafana.yaml     # `Metrics visualization`
+```
+
+Install Kiali:
+```bash
+kubectl apply -f samples/addons/kiali.yaml       # `Service mesh dashboard`
+```
+
+Install Jaeger:
+```bash
+kubectl apply -f samples/addons/jaeger.yaml      # `Distributed tracing`
+```
+
+Verify addon deployments:
+```bash
+kubectl get pods --namespace $ISTIO_NS | grep -E "prometheus|grafana|kiali|jaeger"  # `Check addon pods`
+```
+
+---
+
+## Step 17: Access Observability Dashboards
+
+Open Kiali (service mesh topology):
+```bash
+istioctl dashboard kiali  # `Open Kiali dashboard`
+```
+
+Open Grafana (metrics):
+```bash
+istioctl dashboard grafana  # `Open Grafana dashboard`
+```
+
+Open Jaeger (tracing):
+```bash
+istioctl dashboard jaeger  # `Open Jaeger UI`
+```
+
+Alternatively, use port-forwarding:
+```bash
+kubectl port-forward \
+  --namespace $ISTIO_NS \
+  svc/kiali 20001:20001 &  # `Access Kiali at http://localhost:20001`
+
+kubectl port-forward \
+  --namespace $ISTIO_NS \
+  svc/grafana 3000:3000 &  # `Access Grafana at http://localhost:3000`
+```
+
+---
+
+## Step 18: Generate Traffic for Observability
+
+Generate continuous traffic:
+```bash
+while true; do \
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null; \
+  sleep 0.5; \
+done
+```
+
+Watch traffic in Kiali:
+- Navigate to Graph tab
+- Select "Versioned app graph"
+- Enable "Traffic Animation"
+
+---
+
+## Step 19: Analyze Mesh Configuration
+
+Check proxy status:
+```bash
+istioctl proxy-status  # `Show status of all Envoy proxies`
+```
+
+Validate Istio configuration:
+```bash
+istioctl analyze --namespace $APP_NS  # `Detect configuration issues`
+```
+
+View proxy configuration:
+```bash
+PRODUCTPAGE_POD=$(kubectl get pod --namespace $APP_NS -l app=productpage -o jsonpath='{.items[0].metadata.name}')
+
+istioctl proxy-config routes $PRODUCTPAGE_POD --namespace $APP_NS  # `View route configuration`
+istioctl proxy-config clusters $PRODUCTPAGE_POD --namespace $APP_NS  # `View cluster configuration`
+```
+
+---
+
+## Expected Results
+
+After completing this lab, you should have:
+- ✅ Working AKS cluster with Istio service mesh
+- ✅ Bookinfo application deployed with Envoy sidecars (2/2 containers per pod)
+- ✅ Istio Gateway exposing application externally
+- ✅ Traffic management policies (routing, splits, header-based)
+- ✅ Resilience patterns (circuit breakers, timeouts, retries, fault injection)
+- ✅ Security features (mTLS encryption, authorization policies)
+- ✅ Observability stack (Prometheus, Grafana, Kiali, Jaeger)
+- ✅ Service mesh visibility with traffic topology and distributed traces
+
+---
+
+## Key Takeaways
+
+**Istio Service Mesh Benefits**:
+- **Traffic Management**: Fine-grained control over traffic routing and load balancing
+- **Resilience**: Built-in circuit breakers, timeouts, and retries without code changes
+- **Security**: Automatic mTLS encryption and powerful authorization policies
+- **Observability**: Comprehensive metrics, logs, and traces for all service-to-service communication
+
+**Istio Architecture**:
+- **Control Plane (istiod)**: Configuration management, service discovery, certificate authority
+- **Data Plane (Envoy)**: Sidecar proxies intercept all network traffic
+- **Ingress Gateway**: Handles external traffic entering the mesh
+- **Egress Gateway**: Controls traffic leaving the mesh
+
+---
+
+## Cleanup
+
+**Option 1** - Remove Istio only (keep AKS cluster):
+```bash
+# Uninstall addons
+kubectl delete -f samples/addons/prometheus.yaml  # `Remove Prometheus`
+kubectl delete -f samples/addons/grafana.yaml     # `Remove Grafana`
+kubectl delete -f samples/addons/kiali.yaml       # `Remove Kiali`
+kubectl delete -f samples/addons/jaeger.yaml      # `Remove Jaeger`
+
+# Remove application
+kubectl delete namespace $APP_NS  # `Delete application namespace`
+
+# Uninstall Istio
+istioctl uninstall --purge -y  # `Remove all Istio components`
+
+# Delete Istio namespace
+kubectl delete namespace $ISTIO_NS  # `Remove Istio namespace`
+```
+
+**Option 2** - Delete entire resource group:
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \  # `Resource group name`
+  --yes \                   # `Skip confirmation`
+  --no-wait                 # `Don't wait for completion`
+```
+
+---
+
+**Lab Complete!** You've successfully deployed and configured Istio service mesh on AKS with comprehensive traffic management, security, and observability features.
