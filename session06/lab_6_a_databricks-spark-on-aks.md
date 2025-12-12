@@ -1,85 +1,129 @@
 # Lab 6a: Databricks Spark on AKS
 
 ## Objective
-Run Apache Spark workloads from Databricks on Azure Kubernetes Service.
+Deploy Azure Databricks and configure it to run Apache Spark workloads on Azure Kubernetes Service (AKS). Master the integration between Databricks and AKS for scalable, cost-effective Spark job execution with dynamic resource allocation and Azure storage integration.
 
-## Prerequisites
-- AKS cluster running
-- Azure Databricks workspace
-- `kubectl` configured
-- Azure CLI installed
-- Contributor access to AKS and Databricks
+---
 
-## Steps
+## Lab Parameters
 
-### 1. Create Azure Databricks Workspace
+Set these variables at the start:
+
 ```bash
-# Set variables
-RESOURCE_GROUP="aks-databricks-rg"
-LOCATION="eastus"
-DATABRICKS_WORKSPACE="aks-databricks-workspace"
-AKS_CLUSTER="aks-spark-cluster"
+# Azure Resources
+RESOURCE_GROUP="rg-aks-databricks-spark"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-spark-cluster"
+NODE_COUNT=3
+NODE_SIZE="Standard_D8s_v3"
+K8S_VERSION="1.28"
 
-# Create resource group
+# Databricks Configuration
+DATABRICKS_WORKSPACE="databricks-spark-workspace"
+DATABRICKS_SKU="premium"
+
+# Spark Configuration
+SPARK_NAMESPACE="spark-jobs"
+SPARK_SA="spark"
+SPARK_EXECUTOR_INSTANCES="3"
+SPARK_EXECUTOR_MEMORY="4g"
+SPARK_EXECUTOR_CORES="2"
+
+# Managed Identity
+IDENTITY_NAME="spark-identity"
+
+# Storage (optional - for ADLS integration)
+STORAGE_ACCOUNT="sparkstorageaks"
+CONTAINER_NAME="spark-data"
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
 az group create \
-  --name $RESOURCE_GROUP \
-  --location $LOCATION
+  --name $RESOURCE_GROUP \      # `Resource group name`
+  --location $LOCATION          # `Azure region (Sydney, Australia)`
+```
 
-# Create Databricks workspace
+---
+
+## Step 2: Create Azure Databricks Workspace
+
+```bash
 az databricks workspace create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $DATABRICKS_WORKSPACE \           # `Workspace name`
+  --location $LOCATION \                   # `Region`
+  --sku $DATABRICKS_SKU                    # `SKU (premium for advanced features)`
+
+az databricks workspace wait \
   --resource-group $RESOURCE_GROUP \
   --name $DATABRICKS_WORKSPACE \
-  --location $LOCATION \
-  --sku premium
+  --created                                # `Wait for workspace creation`
 
-# Get workspace URL
 DATABRICKS_URL=$(az databricks workspace show \
   --resource-group $RESOURCE_GROUP \
   --name $DATABRICKS_WORKSPACE \
-  --query workspaceUrl -o tsv)
+  --query workspaceUrl \
+  -o tsv)                                  # `Get workspace URL`
 
+echo "Databricks workspace created: $DATABRICKS_WORKSPACE"
 echo "Databricks URL: https://$DATABRICKS_URL"
 ```
 
-### 2. Create or Use Existing AKS Cluster
-```bash
-# Create AKS cluster optimized for Spark workloads
-az aks create \
-  --resource-group $RESOURCE_GROUP \
-  --name $AKS_CLUSTER \
-  --location $LOCATION \
-  --node-count 3 \
-  --node-vm-size Standard_D8s_v3 \
-  --enable-managed-identity \
-  --network-plugin azure \
-  --generate-ssh-keys
+---
 
-# Get credentials
+## Step 3: Create AKS Cluster for Spark Workloads
+
+```bash
+az aks create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $CLUSTER_NAME \                   # `Cluster name`
+  --location $LOCATION \                   # `Region`
+  --node-count $NODE_COUNT \               # `Number of nodes`
+  --node-vm-size $NODE_SIZE \              # `VM size (8 vCPU, 32GB for Spark)`
+  --kubernetes-version $K8S_VERSION \      # `Kubernetes version`
+  --enable-managed-identity \              # `Use managed identity`
+  --generate-ssh-keys \                    # `Generate SSH keys`
+  --network-plugin azure \                 # `Azure CNI networking`
+  --no-wait                                # `Don't wait for completion`
+
+az aks wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --created                                # `Wait for cluster creation`
+
 az aks get-credentials \
   --resource-group $RESOURCE_GROUP \
-  --name $AKS_CLUSTER \
-  --overwrite-existing
+  --name $CLUSTER_NAME \
+  --overwrite-existing                     # `Configure kubectl`
+
+echo "AKS cluster created: $CLUSTER_NAME"
 ```
 
-### 3. Configure AKS for Spark Workloads
+---
+
+## Step 4: Configure AKS for Spark Workloads
+
 Create namespace and service account:
-
 ```bash
-# Create namespace for Spark jobs
-kubectl create namespace spark-jobs
+kubectl create namespace $SPARK_NAMESPACE  # `Create namespace for Spark jobs`
 
-# Create service account
-kubectl create serviceaccount spark -n spark-jobs
+kubectl create serviceaccount $SPARK_SA \
+  --namespace $SPARK_NAMESPACE             # `Create service account for Spark`
+
+echo "Namespace and service account created"
 ```
 
-Create RBAC role:
-
-```yaml
+Create RBAC role and binding:
+```bash
+kubectl apply --namespace $SPARK_NAMESPACE -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: spark-role
-  namespace: spark-jobs
 rules:
 - apiGroups: [""]
   resources: ["pods", "services", "configmaps"]
@@ -92,41 +136,55 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: spark-role-binding
-  namespace: spark-jobs
 subjects:
 - kind: ServiceAccount
-  name: spark
-  namespace: spark-jobs
+  name: $SPARK_SA
+  namespace: $SPARK_NAMESPACE
 roleRef:
   kind: Role
   name: spark-role
   apiGroup: rbac.authorization.k8s.io
+EOF
+
+echo "RBAC role and binding created"
 ```
 
-Apply:
+---
+
+## Step 5: Get AKS Cluster Information
+
+Get API server URL:
 ```bash
-kubectl apply -f spark-rbac.yaml
+AKS_API_SERVER=$(kubectl config view --minify \
+  -o jsonpath='{.clusters[0].cluster.server}')  # `Get API server endpoint`
+
+echo "AKS API Server: $AKS_API_SERVER"
 ```
 
-### 4. Get AKS Cluster Information
+Create service account token (Kubernetes 1.24+):
 ```bash
-# Get API server URL
-AKS_API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+kubectl apply --namespace $SPARK_NAMESPACE -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: $SPARK_SA-token
+  annotations:
+    kubernetes.io/service-account.name: $SPARK_SA
+type: kubernetes.io/service-account-token
+EOF
 
-# Get cluster CA certificate
-kubectl get secret \
-  $(kubectl get sa spark -n spark-jobs -o jsonpath='{.secrets[0].name}') \
-  -n spark-jobs \
-  -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+kubectl wait \
+  --for=jsonpath='{.data.token}' \
+  secret/$SPARK_SA-token \
+  --namespace $SPARK_NAMESPACE \
+  --timeout=60s                            # `Wait for token generation`
 
-# Get service account token
-SA_TOKEN=$(kubectl get secret \
-  $(kubectl get sa spark -n spark-jobs -o jsonpath='{.secrets[0].name}') \
-  -n spark-jobs \
-  -o jsonpath='{.data.token}' | base64 -d)
+SA_TOKEN=$(kubectl get secret $SPARK_SA-token \
+  --namespace $SPARK_NAMESPACE \
+  -o jsonpath='{.data.token}' | base64 -d)  # `Get service account token`
 
-echo "API Server: $AKS_API_SERVER"
-echo "Token saved to variable SA_TOKEN"
+echo "Service account token captured"
+echo "Token length: ${#SA_TOKEN} characters"
 ```
 
 ### 5. Create Databricks Cluster with AKS Integration
@@ -149,31 +207,74 @@ spark.kubernetes.namespace spark-jobs
 spark.kubernetes.authenticate.driver.serviceAccountName spark
 ```
 
-### 6. Configure Databricks to Access AKS
-Create Databricks secret scope for AKS credentials:
+---
 
+## Step 6: Configure Databricks to Access AKS
+
+Install Databricks CLI:
 ```bash
-# Install Databricks CLI
-pip install databricks-cli
+pip install databricks-cli  # `Install Databricks command-line interface`
 
-# Configure Databricks CLI
-databricks configure --token
-
-# Create secret scope
-databricks secrets create-scope --scope aks-secrets
-
-# Add AKS credentials
-databricks secrets put-secret --scope aks-secrets \
-  --key aks-api-server \
-  --string-value "$AKS_API_SERVER"
-
-databricks secrets put-secret --scope aks-secrets \
-  --key aks-token \
-  --string-value "$SA_TOKEN"
+echo "Databricks CLI installed"
 ```
 
-### 7. Create Spark Application
-Create notebook in Databricks:
+Configure Databricks CLI:
+```bash
+# You'll be prompted for:
+# - Databricks Host: https://$DATABRICKS_URL
+# - Token: Generate from Databricks UI -> User Settings -> Access Tokens
+
+databricks configure --token  # `Configure Databricks CLI with token`
+```
+
+Create secret scope and store AKS credentials:
+```bash
+databricks secrets create-scope \
+  --scope aks-secrets  # `Create secret scope for AKS credentials`
+
+databricks secrets put-secret \
+  --scope aks-secrets \
+  --key aks-api-server \
+  --string-value "$AKS_API_SERVER"  # `Store API server URL`
+
+databricks secrets put-secret \
+  --scope aks-secrets \
+  --key aks-token \
+  --string-value "$SA_TOKEN"  # `Store service account token`
+
+echo "AKS credentials stored in Databricks secrets"
+```
+
+---
+
+## Step 7: Create Databricks Cluster
+
+**In Databricks UI:**
+
+1. Navigate to **Compute** → **Create Cluster**
+2. Configure cluster:
+   - **Cluster name**: `spark-on-aks`
+   - **Cluster mode**: Standard
+   - **Databricks Runtime**: 13.3 LTS or latest
+   - **Worker type**: `Standard_D8s_v3`
+   - **Min workers**: 2
+   - **Max workers**: 5
+   - **Enable autoscaling**: Yes
+
+3. Add Spark configuration (Advanced Options → Spark):
+```properties
+spark.kubernetes.container.image.pullPolicy Always
+spark.kubernetes.namespace spark-jobs
+spark.kubernetes.authenticate.driver.serviceAccountName spark
+```
+
+4. Click **Create Cluster**
+
+---
+
+## Step 8: Create Sample Spark Application
+
+**Create notebook in Databricks with this PySpark code:
 
 ```python
 # Sample PySpark application
@@ -261,21 +362,47 @@ print(result.stdout)
 print(result.stderr)
 ```
 
-### 10. Monitor Spark Jobs on AKS
+---
+
+## Step 10: Monitor Spark Jobs on AKS
+
+Watch Spark pods:
 ```bash
-# Watch Spark driver pods
-kubectl get pods -n spark-jobs -w
+kubectl get pods \
+  --namespace $SPARK_NAMESPACE \
+  --watch  # `Watch Spark driver and executor pods`
+```
 
-# View logs from Spark driver
-DRIVER_POD=$(kubectl get pods -n spark-jobs -l spark-role=driver --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
-kubectl logs -f $DRIVER_POD -n spark-jobs
+View Spark driver logs:
+```bash
+DRIVER_POD=$(kubectl get pods \
+  --namespace $SPARK_NAMESPACE \
+  -l spark-role=driver \
+  --sort-by=.metadata.creationTimestamp \
+  -o jsonpath='{.items[-1].metadata.name}')  # `Get latest driver pod`
 
-# View executor pods
-kubectl get pods -n spark-jobs -l spark-role=executor
+kubectl logs \
+  --namespace $SPARK_NAMESPACE \
+  --follow $DRIVER_POD  # `Follow driver logs`
 
-# Check Spark UI
-kubectl port-forward -n spark-jobs $DRIVER_POD 4040:4040
-# Access at http://localhost:4040
+echo "Driver pod: $DRIVER_POD"
+```
+
+View executor pods:
+```bash
+kubectl get pods \
+  --namespace $SPARK_NAMESPACE \
+  -l spark-role=executor  # `List executor pods`
+```
+
+Access Spark UI:
+```bash
+kubectl port-forward \
+  --namespace $SPARK_NAMESPACE \
+  --address 0.0.0.0 \
+  $DRIVER_POD 4040:4040 &  # `Port-forward to Spark UI`
+
+echo "Spark UI: http://localhost:4040"
 ```
 
 ### 11. Create Databricks Job for AKS Spark
@@ -299,42 +426,41 @@ In Databricks UI:
 }
 ```
 
-### 12. Configure Resource Quotas for Spark
-Create resource quota:
+---
 
-```yaml
+## Step 9: Configure Resource Quotas for Spark
+
+Create resource quota and limits:
+```bash
+kubectl apply --namespace $SPARK_NAMESPACE -f - <<EOF
 apiVersion: v1
 kind: ResourceQuota
 metadata:
   name: spark-quota
-  namespace: spark-jobs
 spec:
   hard:
-    requests.cpu: "32"
-    requests.memory: 64Gi
-    limits.cpu: "64"
-    limits.memory: 128Gi
-    pods: "50"
+    requests.cpu: "32"         # Max 32 vCPUs requested
+    requests.memory: 64Gi      # Max 64GB RAM requested
+    limits.cpu: "64"           # Max 64 vCPUs limit
+    limits.memory: 128Gi       # Max 128GB RAM limit
+    pods: "50"                 # Max 50 pods
 ---
 apiVersion: v1
 kind: LimitRange
 metadata:
   name: spark-limits
-  namespace: spark-jobs
 spec:
   limits:
   - max:
-      cpu: "8"
-      memory: 16Gi
+      cpu: "8"                 # Max 8 vCPUs per container
+      memory: 16Gi             # Max 16GB per container
     min:
-      cpu: "1"
-      memory: 1Gi
+      cpu: "1"                 # Min 1 vCPU per container
+      memory: 1Gi              # Min 1GB per container
     type: Container
-```
+EOF
 
-Apply:
-```bash
-kubectl apply -f spark-quotas.yaml
+echo "Resource quotas and limits configured"
 ```
 
 ### 13. Enable Dynamic Allocation
@@ -352,25 +478,36 @@ spark = SparkSession.builder \
     .getOrCreate()
 ```
 
-### 14. Configure Persistent Storage for Spark
-Create PersistentVolumeClaim:
+---
 
-```yaml
+## Step 11: Configure Persistent Storage for Spark
+
+Create PersistentVolumeClaim:
+```bash
+kubectl apply --namespace $SPARK_NAMESPACE -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: spark-storage
-  namespace: spark-jobs
 spec:
   accessModes:
-    - ReadWriteMany
-  storageClassName: azurefile
+    - ReadWriteMany       # Multiple pods can mount
+  storageClassName: azurefile  # Azure Files for RWX
   resources:
     requests:
-      storage: 100Gi
+      storage: 100Gi       # 100GB storage
+EOF
+
+kubectl wait \
+  --for=jsonpath='{.status.phase}'=Bound \
+  pvc/spark-storage \
+  --namespace $SPARK_NAMESPACE \
+  --timeout=300s  # `Wait for PVC to be bound`
+
+echo "Persistent storage configured"
 ```
 
-Mount in Spark configuration:
+**Mount in Spark configuration (use in Databricks notebook):
 
 ```python
 spark_conf = {
@@ -405,36 +542,55 @@ df.show()
 df.write.mode("overwrite").parquet(f"abfss://{container}@{storage_account}.dfs.core.windows.net/output/")
 ```
 
-### 16. Use Azure Managed Identity for Authentication
-Configure AKS pod identity:
+---
 
+## Step 12: Configure Azure Managed Identity
+
+Enable pod identity on AKS:
 ```bash
-# Enable pod identity on AKS
 az aks update \
   --resource-group $RESOURCE_GROUP \
-  --name $AKS_CLUSTER \
-  --enable-pod-identity
+  --name $CLUSTER_NAME \
+  --enable-pod-identity  # `Enable workload identity`
 
-# Create managed identity
-IDENTITY_NAME="spark-identity"
-az identity create \
-  --resource-group $RESOURCE_GROUP \
-  --name $IDENTITY_NAME
-
-# Get identity details
-IDENTITY_CLIENT_ID=$(az identity show --resource-group $RESOURCE_GROUP --name $IDENTITY_NAME --query clientId -o tsv)
-IDENTITY_RESOURCE_ID=$(az identity show --resource-group $RESOURCE_GROUP --name $IDENTITY_NAME --query id -o tsv)
-
-# Create pod identity binding
-az aks pod-identity add \
-  --resource-group $RESOURCE_GROUP \
-  --cluster-name $AKS_CLUSTER \
-  --namespace spark-jobs \
-  --name spark-pod-identity \
-  --identity-resource-id $IDENTITY_RESOURCE_ID
+echo "Pod identity enabled on AKS"
 ```
 
-Use in Spark:
+Create managed identity:
+```bash
+az identity create \
+  --resource-group $RESOURCE_GROUP \
+  --name $IDENTITY_NAME  # `Create managed identity for Spark`
+
+IDENTITY_CLIENT_ID=$(az identity show \
+  --resource-group $RESOURCE_GROUP \
+  --name $IDENTITY_NAME \
+  --query clientId \
+  -o tsv)  # `Get client ID`
+
+IDENTITY_RESOURCE_ID=$(az identity show \
+  --resource-group $RESOURCE_GROUP \
+  --name $IDENTITY_NAME \
+  --query id \
+  -o tsv)  # `Get resource ID`
+
+echo "Managed identity created: $IDENTITY_NAME"
+echo "Client ID: $IDENTITY_CLIENT_ID"
+```
+
+Create pod identity binding:
+```bash
+az aks pod-identity add \
+  --resource-group $RESOURCE_GROUP \
+  --cluster-name $CLUSTER_NAME \
+  --namespace $SPARK_NAMESPACE \
+  --name spark-pod-identity \
+  --identity-resource-id $IDENTITY_RESOURCE_ID  # `Bind identity to namespace`
+
+echo "Pod identity binding created"
+```
+
+**Use in Spark (Databricks notebook):
 
 ```python
 spark = SparkSession.builder \
@@ -491,24 +647,28 @@ spark_config = {
 }
 ```
 
-### 19. Use Spot Instances for Executors
-Create node pool with spot instances:
+---
 
+## Step 13: Add Spot Instance Node Pool for Cost Optimization
+
+Create spot instance node pool:
 ```bash
 az aks nodepool add \
   --resource-group $RESOURCE_GROUP \
-  --cluster-name $AKS_CLUSTER \
+  --cluster-name $CLUSTER_NAME \
   --name sparkspot \
   --node-count 3 \
   --priority Spot \
   --eviction-policy Delete \
   --spot-max-price -1 \
-  --node-vm-size Standard_D8s_v3 \
+  --node-vm-size $NODE_SIZE \
   --labels workload=spark tier=spot \
-  --node-taints spot=true:NoSchedule
+  --node-taints spot=true:NoSchedule  # `Taint to prevent non-Spark workloads`
+
+echo "Spot node pool 'sparkspot' created"
 ```
 
-Configure Spark to use spot nodes:
+**Configure Spark to use spot nodes (Databricks notebook):
 
 ```python
 spark_conf = {
@@ -518,28 +678,28 @@ spark_conf = {
 }
 ```
 
-### 20. Cleanup
+---
+
+## Cleanup
+
+**Option 1** - Remove Spark resources only:
 ```bash
-# Delete Spark jobs
-kubectl delete all --all -n spark-jobs
+kubectl delete all --all \
+  --namespace $SPARK_NAMESPACE  # `Delete all Spark jobs and pods`
 
-# Delete namespace
-kubectl delete namespace spark-jobs
+kubectl delete namespace $SPARK_NAMESPACE  # `Delete Spark namespace`
 
-# Delete Databricks workspace
-az databricks workspace delete \
-  --resource-group $RESOURCE_GROUP \
-  --name $DATABRICKS_WORKSPACE \
-  --yes
+echo "Spark resources removed"
+```
 
-# Delete AKS cluster (if created for this lab)
-az aks delete \
-  --resource-group $RESOURCE_GROUP \
-  --name $AKS_CLUSTER \
-  --yes --no-wait
+**Option 2** - Delete entire resource group:
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait  # `Delete RG (includes Databricks, AKS, storage)`
 
-# Delete resource group
-az group delete --name $RESOURCE_GROUP --yes --no-wait
+echo "Resource group deletion initiated"
 ```
 
 ## Expected Results
