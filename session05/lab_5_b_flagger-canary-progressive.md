@@ -1,86 +1,204 @@
 # Lab 5b: Flagger Canary Progressive Delivery
 
 ## Objective
-Implement progressive delivery with Flagger for automated canary deployments.
+Learn to implement automated, metrics-driven progressive delivery on AKS using Flagger for canary deployments with automated analysis and rollback.
 
 ## Prerequisites
-- AKS cluster running
-- `kubectl` configured
+- Azure CLI installed and authenticated
+- `kubectl` installed
 - Helm 3 installed
-- Ingress controller or service mesh (Istio/Linkerd) installed
+- Docker installed (optional, for custom apps)
+- Basic understanding of Kubernetes deployments
 
-## Steps
-
-### 1. Install Flagger
-```bash
-# Add Flagger Helm repository
-helm repo add flagger https://flagger.app
-helm repo update
-
-# Create namespace
-kubectl create namespace flagger-system
-
-# Install Flagger for Kubernetes (without service mesh)
-helm install flagger flagger/flagger \
-  --namespace flagger-system \
-  --set meshProvider=kubernetes \
-  --set metricsServer=http://prometheus.monitoring:9090
-
-# For Istio integration:
-# helm install flagger flagger/flagger \
-#   --namespace flagger-system \
-#   --set meshProvider=istio \
-#   --set metricsServer=http://prometheus.istio-system:9090
-
-# Verify installation
-kubectl get pods -n flagger-system
-```
-
-### 2. Install Flagger Load Tester
-```bash
-# Install load tester for automated canary testing
-helm install flagger-loadtester flagger/loadtester \
-  --namespace flagger-system \
-  --set cmd.timeout=1h
-
-# Verify
-kubectl get svc -n flagger-system
-```
-
-### 3. Deploy Application for Canary
-Create `podinfo-deployment.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: canary-demo
 ---
+
+## Lab Parameters
+
+```bash
+# Resource and location settings
+RESOURCE_GROUP="rg-aks-flagger-lab"
+LOCATION="australiaeast"  # Sydney, Australia
+
+# AKS cluster settings
+CLUSTER_NAME="aks-flagger-lab"
+NODE_COUNT=3
+NODE_SIZE="Standard_D2s_v3"
+K8S_VERSION="1.29"
+
+# Flagger settings
+FLAGGER_NS="flagger-system"
+CANARY_NS="canary-demo"
+PROMETHEUS_NS="monitoring"
+
+# Application settings
+APP_NAME="podinfo"
+PODINFO_VERSION="6.3.0"
+PODINFO_NEW_VERSION="6.3.1"
+PROMETHEUS_URL="http://prometheus.${PROMETHEUS_NS}:9090"
+```
+
+Display configuration:
+```bash
+echo "=== Lab 5b: Flagger Canary Progressive Delivery ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Node Count: $NODE_COUNT"
+echo "Flagger Namespace: $FLAGGER_NS"
+echo "Canary Namespace: $CANARY_NS"
+echo "Prometheus Namespace: $PROMETHEUS_NS"
+echo "Application: $APP_NAME"
+echo "Prometheus URL: $PROMETHEUS_URL"
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \              # `Resource group name`
+  --location $LOCATION                  # `Azure region`
+```
+
+---
+
+## Step 2: Create AKS Cluster
+
+```bash
+az aks create \
+  --resource-group $RESOURCE_GROUP \            # `Resource group`
+  --name $CLUSTER_NAME \                        # `Cluster name`
+  --location $LOCATION \                        # `Azure region`
+  --node-count $NODE_COUNT \                    # `Number of nodes`
+  --node-vm-size $NODE_SIZE \                   # `VM size for nodes`
+  --kubernetes-version $K8S_VERSION \           # `Kubernetes version`
+  --network-plugin azure \                      # `Azure CNI networking`
+  --enable-managed-identity \                   # `Use managed identity`
+  --generate-ssh-keys                           # `Generate SSH keys`
+```
+
+Get credentials:
+```bash
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing  # `Merge credentials to kubeconfig`
+```
+
+---
+
+## Step 3: Install Prometheus
+
+Create namespace:
+```bash
+kubectl create namespace $PROMETHEUS_NS  # `Create monitoring namespace`
+```
+
+Add Prometheus Helm repo:
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts  # `Add Prometheus repo`
+helm repo update  # `Update repo index`
+```
+
+Install Prometheus:
+```bash
+helm install prometheus prometheus-community/prometheus \
+  --namespace $PROMETHEUS_NS \          # `Target namespace`
+  --set alertmanager.enabled=false \    # `Disable Alertmanager`
+  --set pushgateway.enabled=false \     # `Disable Pushgateway`
+  --set nodeExporter.enabled=false \    # `Disable Node Exporter`
+  --wait                                # `Wait for deployment`
+```
+
+Verify Prometheus:
+```bash
+kubectl get pods --namespace $PROMETHEUS_NS  # `List Prometheus pods`
+kubectl get svc --namespace $PROMETHEUS_NS   # `Show Prometheus services`
+```
+
+---
+
+## Step 4: Install Flagger
+
+Add Flagger Helm repository:
+```bash
+helm repo add flagger https://flagger.app  # `Add Flagger Helm repo`
+helm repo update  # `Update repo index`
+```
+
+Create Flagger namespace:
+```bash
+kubectl create namespace $FLAGGER_NS  # `Create Flagger system namespace`
+```
+
+Install Flagger:
+```bash
+helm install flagger flagger/flagger \
+  --namespace $FLAGGER_NS \             # `Target namespace`
+  --set meshProvider=kubernetes \       # `Use Kubernetes provider (no service mesh)`
+  --set metricsServer=$PROMETHEUS_URL \ # `Prometheus metrics endpoint`
+  --wait                                # `Wait for deployment`
+```
+
+Verify Flagger installation:
+```bash
+kubectl get pods --namespace $FLAGGER_NS  # `List Flagger pods`
+kubectl get crd | grep flagger            # `Show Flagger CRDs`
+```
+
+---
+
+## Step 5: Install Flagger Load Tester
+
+Install load tester:
+```bash
+helm install flagger-loadtester flagger/loadtester \
+  --namespace $FLAGGER_NS \     # `Target namespace`
+  --set cmd.timeout=1h \        # `Test timeout duration`
+  --wait                        # `Wait for deployment`
+```
+
+Verify load tester:
+```bash
+kubectl get svc --namespace $FLAGGER_NS  # `Show load tester service`
+```
+
+---
+
+## Step 6: Deploy Application for Canary
+
+Create canary namespace:
+```bash
+kubectl create namespace $CANARY_NS  # `Create canary demo namespace`
+```
+
+Deploy podinfo application:
+```bash
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: podinfo
-  namespace: canary-demo
+  name: $APP_NAME
+  namespace: $CANARY_NS
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: podinfo
+      app: $APP_NAME
   template:
     metadata:
       labels:
-        app: podinfo
+        app: $APP_NAME
     spec:
       containers:
-      - name: podinfo
-        image: ghcr.io/stefanprodan/podinfo:6.3.0
+      - name: $APP_NAME
+        image: ghcr.io/stefanprodan/podinfo:$PODINFO_VERSION
         ports:
         - containerPort: 9898
           name: http
-          protocol: TCP
         - containerPort: 9797
           name: http-metrics
-          protocol: TCP
         command:
         - ./podinfo
         - --port=9898
@@ -108,26 +226,26 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: podinfo
-  namespace: canary-demo
+  name: $APP_NAME
+  namespace: $CANARY_NS
 spec:
   type: ClusterIP
   selector:
-    app: podinfo
+    app: $APP_NAME
   ports:
   - name: http
     port: 9898
     targetPort: http
-    protocol: TCP
   - name: http-metrics
     port: 9797
     targetPort: http-metrics
-    protocol: TCP
+EOF
 ```
 
-Apply:
+Verify deployment:
 ```bash
-kubectl apply -f podinfo-deployment.yaml
+kubectl get pods --namespace $CANARY_NS  # `List application pods`
+kubectl get svc --namespace $CANARY_NS   # `Show services`
 
 # Verify deployment
 kubectl get pods -n canary-demo
