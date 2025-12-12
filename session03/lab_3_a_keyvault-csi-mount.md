@@ -1,4 +1,5 @@
 # Lab 3a: Key Vault CSI Mount
+<img width="1412" height="649" alt="ZIMAGE" src="https://github.com/user-attachments/assets/b7de30ea-9e18-4766-b9f0-42e6d3dc6734" />
 
 ## Objective
 Mount Azure Key Vault secrets into AKS pods using the **Key Vault CSI Driver** with full parameterization, comprehensive testing, and production-grade security practices. This lab demonstrates secure secret management without storing credentials in code, container images, or Kubernetes manifests.
