@@ -1,5 +1,6 @@
 # Lab 4d: Multi-Region Failover with Azure Traffic Manager
-![ZIMAGE](https://github.com/user-attachments/assets/6541f393-9ca5-4628-a9ad-f870d10ded6c)
+
+<img width="788" height="522" alt="ZIMAGE" src="https://github.com/user-attachments/assets/fac768a3-9743-4f5e-993e-38aba6ba8e60" />
 
 ## Objective
 Deploy an application across two AKS clusters in different Australian regions (Australia East and Australia Southeast), configure Azure Traffic Manager for DNS-based failover, and validate automatic failover on primary region failure.
