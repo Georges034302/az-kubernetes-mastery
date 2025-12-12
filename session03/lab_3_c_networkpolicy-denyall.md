@@ -1,132 +1,280 @@
-# Lab 3c: Network Policy - Deny All
+# Lab 3c: Network Policy - Deny All (Default-Deny Security Model)
 
 ## Objective
-Apply deny-all policy and verify pod-to-pod isolation.
+Implement **default-deny network policies** in AKS using the zero-trust security model. Demonstrate pod-to-pod isolation, namespace segmentation, and selective traffic allowlisting based on application requirements.
 
 ## Prerequisites
-- AKS cluster with network policy enabled (Azure CNI or Calico)
-- `kubectl` configured
-- Understanding of Kubernetes networking
+- Azure CLI installed and authenticated
+- `kubectl` installed
+- Sufficient Azure subscription quota for AKS
 
-## Steps
+---
 
-### 1. Verify Network Policy Support
+## 1. Set Lab Parameters
+
 ```bash
-# Check if network policies are supported
+# Azure resource configuration
+RESOURCE_GROUP="rg-aks-netpol-lab"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-netpol-demo"
+
+# AKS cluster configuration
+NODE_COUNT=3
+NODE_VM_SIZE="Standard_DS2_v2"
+K8S_VERSION="1.28"
+
+# Network policy configuration
+NETWORK_PLUGIN="azure"      # Azure CNI required for network policies
+NETWORK_POLICY="azure"      # Use Azure Network Policy (alternative: calico)
+
+# Namespace configuration
+NS_FRONTEND="frontend"
+NS_BACKEND="backend"
+NS_DATABASE="database"
+
+# Display all configuration
+echo "=== Lab Configuration ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Kubernetes Version: $K8S_VERSION"
+echo "Network Plugin: $NETWORK_PLUGIN"
+echo "Network Policy: $NETWORK_POLICY"
+echo "Namespaces: $NS_FRONTEND, $NS_BACKEND, $NS_DATABASE"
+echo "========================="
+```
+
+---
+
+## 2. Create Resource Group and AKS Cluster with Network Policy
+
+```bash
+# Create resource group
+RG_RESULT=$(az group create \
+  --name $RESOURCE_GROUP `# Resource group name` \
+  --location $LOCATION `# Azure region` \
+  --query 'properties.provisioningState' \
+  --output tsv)
+
+echo "Resource Group: $RG_RESULT"
+
+# Create AKS cluster with Azure CNI and Network Policy (7-12 minutes)
+CLUSTER_RESULT=$(az aks create \
+  --resource-group $RESOURCE_GROUP `# Target resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --location $LOCATION `# Azure region` \
+  --node-count $NODE_COUNT `# Initial node count` \
+  --node-vm-size $NODE_VM_SIZE `# Node VM size` \
+  --kubernetes-version $K8S_VERSION `# K8s version` \
+  --network-plugin $NETWORK_PLUGIN `# Azure CNI (required for network policies)` \
+  --network-policy $NETWORK_POLICY `# Enable Azure Network Policy` \
+  --enable-managed-identity `# Use system-assigned managed identity` \
+  --generate-ssh-keys `# Auto-generate SSH keys` \
+  --query 'provisioningState' \
+  --output tsv)
+
+echo "AKS Cluster: $CLUSTER_RESULT"
+
+# Get AKS credentials
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP `# Source resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --overwrite-existing `# Replace existing kubeconfig entry` \
+  --output none
+
+# Verify cluster connectivity and network policy support
+echo "Current kubectl context: $(kubectl config current-context)"
+kubectl get nodes
+```
+
+---
+
+## 3. Verify Network Policy Support
+
+```bash
+# Check Kubernetes Network Policy API availability
 kubectl api-versions | grep networking.k8s.io/v1
 
-# For AKS, ensure network policy is enabled
-az aks show \
-  --resource-group <resource-group> \
-  --name <cluster-name> \
-  --query "networkProfile.networkPolicy" -o tsv
+# Verify network policy is enabled in AKS cluster
+NETPOL_STATUS=$(az aks show \
+  --resource-group $RESOURCE_GROUP `# Source resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --query "networkProfile.networkPolicy" \
+  --output tsv)
+
+echo "Network Policy Provider: $NETPOL_STATUS"
 ```
 
-If not enabled, update cluster:
+---
+
+## 4. Create Test Namespaces
+
 ```bash
-# Note: This requires Azure CNI networking
-az aks update \
-  --resource-group <resource-group> \
-  --name <cluster-name> \
-  --network-policy azure
+# Create namespaces for three-tier application
+kubectl create namespace $NS_FRONTEND
+kubectl create namespace $NS_BACKEND
+kubectl create namespace $NS_DATABASE
+
+# Verify namespace creation
+kubectl get namespaces | grep -E "frontend|backend|database"
 ```
 
-### 2. Create Test Namespaces
-```bash
-kubectl create namespace frontend
-kubectl create namespace backend
-kubectl create namespace database
-```
+---
 
-### 3. Deploy Test Applications
+## 5. Deploy Test Applications
 
-**Frontend app:**
+### Frontend Application
+
 ```bash
+# Deploy frontend pod with labels
 kubectl run frontend \
-  --image=nginx \
-  --labels=app=frontend,tier=frontend \
-  -n frontend
+  --image=nginx `# Web server` \
+  --labels=app=frontend,tier=frontend `# Selector labels` \
+  -n $NS_FRONTEND
+
+# Expose frontend as a service
+kubectl expose pod frontend \
+  --port=80 `# Service port` \
+  -n $NS_FRONTEND
+
+# Wait for pod to be ready
+kubectl wait --for=condition=ready \
+  --timeout=60s \
+  pod/frontend \
+  -n $NS_FRONTEND
 ```
 
-**Backend app:**
+### Backend Application
+
 ```bash
+# Deploy backend pod with labels
 kubectl run backend \
-  --image=nginx \
-  --labels=app=backend,tier=backend \
-  -n backend
+  --image=nginx `# Web server` \
+  --labels=app=backend,tier=backend `# Selector labels` \
+  -n $NS_BACKEND
+
+# Expose backend as a service
+kubectl expose pod backend \
+  --port=80 `# Service port` \
+  -n $NS_BACKEND
+
+# Wait for pod to be ready
+kubectl wait --for=condition=ready \
+  --timeout=60s \
+  pod/backend \
+  -n $NS_BACKEND
 ```
 
-**Database app:**
+### Database Application
+
 ```bash
+# Deploy database pod with labels
 kubectl run database \
-  --image=postgres:15-alpine \
-  --labels=app=database,tier=database \
-  --env="POSTGRES_PASSWORD=testpass" \
-  -n database
+  --image=postgres:15-alpine `# PostgreSQL database` \
+  --labels=app=database,tier=database `# Selector labels` \
+  --env="POSTGRES_PASSWORD=testpass" `# Required env var` \
+  -n $NS_DATABASE
+
+# Expose database as a service
+kubectl expose pod database \
+  --port=5432 `# PostgreSQL port` \
+  -n $NS_DATABASE
+
+# Wait for pod to be ready
+kubectl wait --for=condition=ready \
+  --timeout=60s \
+  pod/database \
+  -n $NS_DATABASE
 ```
 
-Expose services:
+### Verify All Deployments
+
 ```bash
-kubectl expose pod frontend --port=80 -n frontend
-kubectl expose pod backend --port=80 -n backend
-kubectl expose pod database --port=5432 -n database
+# List all pods across namespaces
+kubectl get pods -n $NS_FRONTEND
+kubectl get pods -n $NS_BACKEND
+kubectl get pods -n $NS_DATABASE
+
+# List all services
+kubectl get services -n $NS_FRONTEND
+kubectl get services -n $NS_BACKEND
+kubectl get services -n $NS_DATABASE
 ```
 
-### 4. Test Connectivity Before Network Policies
+---
+
+## 6. Test Pre-Policy Connectivity (Baseline - Everything Should Work)
+
 ```bash
-# From frontend to backend (should work)
-kubectl exec -it frontend -n frontend -- curl -m 5 http://backend.backend.svc.cluster.local
+# Test frontend → backend connectivity (HTTP)
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  curl -m 5 http://backend.$NS_BACKEND.svc.cluster.local
 
-# From frontend to database (should work)
-kubectl exec -it frontend -n frontend -- nc -zv database.database.svc.cluster.local 5432
+# Test frontend → database connectivity (TCP port check)
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  nc -zv database.$NS_DATABASE.svc.cluster.local 5432
 
-# From backend to database (should work)
-kubectl exec -it backend -n backend -- nc -zv database.database.svc.cluster.local 5432
+# Test backend → database connectivity (TCP port check)
+kubectl exec -it backend -n $NS_BACKEND -- \
+  nc -zv database.$NS_DATABASE.svc.cluster.local 5432
 ```
 
-**Expected:** All connections succeed (no network policies yet).
+**Expected:** All connections succeed (no network policies applied yet).
 
-### 5. Apply Deny-All Ingress Policy to Database Namespace
-Create `deny-all-ingress-database.yaml`:
+---
 
-```yaml
+## 7. Apply Deny-All Ingress Policy to Database Namespace
+
+```bash
+# Create deny-all ingress policy for database namespace
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: deny-all-ingress
-  namespace: database
+  namespace: $NS_DATABASE
 spec:
   podSelector: {}  # Applies to all pods in namespace
   policyTypes:
   - Ingress
-  # No ingress rules defined = deny all ingress
+  # No ingress rules defined = deny all ingress traffic
+EOF
+
+# Verify policy creation
+kubectl get networkpolicy -n $NS_DATABASE
 ```
 
-Apply:
+---
+
+## 8. Test Connectivity After Deny-All Policy
+
 ```bash
-kubectl apply -f deny-all-ingress-database.yaml
+# Test frontend → database (should fail/timeout)
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  nc -zv -w 5 database.$NS_DATABASE.svc.cluster.local 5432
+
+# Test backend → database (should fail/timeout)
+kubectl exec -it backend -n $NS_BACKEND -- \
+  nc -zv -w 5 database.$NS_DATABASE.svc.cluster.local 5432
 ```
 
-### 6. Test Connectivity After Deny-All Policy
+**Expected:** Connection attempts timeout or fail (denied by network policy).
+
+---
+
+## 9. Allow Backend to Access Database
+
 ```bash
-# From frontend to database (should fail)
-kubectl exec -it frontend -n frontend -- nc -zv -w 5 database.database.svc.cluster.local 5432
+# Label backend namespace for network policy selector
+kubectl label namespace $NS_BACKEND name=backend --overwrite
 
-# From backend to database (should fail)
-kubectl exec -it backend -n backend -- nc -zv -w 5 database.database.svc.cluster.local 5432
-```
-
-**Expected:** Connection attempts timeout (denied).
-
-### 7. Allow Backend to Access Database
-Create `allow-backend-to-database.yaml`:
-
-```yaml
+# Create allow policy for backend → database traffic
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-backend-to-database
-  namespace: database
+  namespace: $NS_DATABASE
 spec:
   podSelector:
     matchLabels:
@@ -144,66 +292,76 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
+EOF
+
+# Verify policy creation
+kubectl get networkpolicy -n $NS_DATABASE
 ```
 
-First, label the backend namespace:
+### Test Selective Connectivity
+
 ```bash
-kubectl label namespace backend name=backend
+# Backend → database should work now
+kubectl exec -it backend -n $NS_BACKEND -- \
+  nc -zv database.$NS_DATABASE.svc.cluster.local 5432
+
+# Frontend → database should still fail
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  nc -zv -w 5 database.$NS_DATABASE.svc.cluster.local 5432
 ```
 
-Apply the policy:
-```bash
-kubectl apply -f allow-backend-to-database.yaml
-```
+**Expected:** Backend can access database, frontend cannot.
 
-Test connectivity:
-```bash
-# From backend to database (should work now)
-kubectl exec -it backend -n backend -- nc -zv database.database.svc.cluster.local 5432
-
-# From frontend to database (should still fail)
-kubectl exec -it frontend -n frontend -- nc -zv -w 5 database.database.svc.cluster.local 5432
-```
-
-### 8. Apply Deny-All to All Namespaces
-Create `deny-all-default.yaml`:
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: deny-all-ingress
-  namespace: frontend
-spec:
-  podSelector: {}
-  policyTypes:
-  - Ingress
 ---
+
+## 10. Apply Deny-All Ingress to All Namespaces
+
+```bash
+# Apply deny-all ingress policy to frontend namespace
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: deny-all-ingress
-  namespace: backend
+  namespace: $NS_FRONTEND
 spec:
   podSelector: {}
   policyTypes:
   - Ingress
+EOF
+
+# Apply deny-all ingress policy to backend namespace
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: $NS_BACKEND
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+EOF
+
+# Verify policies across all namespaces
+kubectl get networkpolicies --all-namespaces
 ```
 
-Apply:
+---
+
+## 11. Allow Frontend to Access Backend
+
 ```bash
-kubectl apply -f deny-all-default.yaml
-```
+# Label frontend namespace for network policy selector
+kubectl label namespace $NS_FRONTEND name=frontend --overwrite
 
-### 9. Create Allow Rules for Application Flow
-**Allow frontend to backend:**
-
-```yaml
+# Create allow policy for frontend → backend traffic
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-frontend-to-backend
-  namespace: backend
+  namespace: $NS_BACKEND
 spec:
   podSelector:
     matchLabels:
@@ -221,55 +379,71 @@ spec:
     ports:
     - protocol: TCP
       port: 80
+EOF
+
+# Verify policy creation
+kubectl get networkpolicy -n $NS_BACKEND
 ```
 
-Label and apply:
+### Test Frontend → Backend Connectivity
+
 ```bash
-kubectl label namespace frontend name=frontend
-kubectl apply -f allow-frontend-to-backend.yaml
+# Frontend → backend should work now
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  curl http://backend.$NS_BACKEND.svc.cluster.local
 ```
 
-Test:
+**Expected:** Frontend can successfully reach backend.
+
+---
+
+## 12. Deny All Egress Traffic
+
 ```bash
-kubectl exec -it frontend -n frontend -- curl http://backend.backend.svc.cluster.local
-```
-
-### 10. Deny All Egress Traffic
-Create `deny-all-egress.yaml`:
-
-```yaml
+# Apply deny-all egress policy to frontend namespace
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: deny-all-egress
-  namespace: frontend
+  namespace: $NS_FRONTEND
 spec:
   podSelector: {}
   policyTypes:
   - Egress
-  # No egress rules = deny all egress
+  # No egress rules = deny all egress traffic
+EOF
+
+# Verify policy creation
+kubectl get networkpolicy -n $NS_FRONTEND
 ```
 
-Apply:
+### Test Egress Blocking
+
 ```bash
-kubectl apply -f deny-all-egress.yaml
+# Frontend → backend should fail now (no egress allowed)
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  curl -m 5 http://backend.$NS_BACKEND.svc.cluster.local
+
+# Frontend → internet should also fail
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  curl -m 5 https://www.google.com
 ```
 
-Test (should fail):
+**Expected:** All egress traffic blocked, including DNS resolution.
+
+---
+
+## 13. Allow Specific Egress (DNS and Backend)
+
 ```bash
-kubectl exec -it frontend -n frontend -- curl -m 5 http://backend.backend.svc.cluster.local
-kubectl exec -it frontend -n frontend -- curl -m 5 https://www.google.com
-```
-
-### 11. Allow Specific Egress (DNS and Backend)
-Create `allow-egress-frontend.yaml`:
-
-```yaml
+# Create allow-egress policy for frontend (DNS + backend)
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-egress-frontend
-  namespace: frontend
+  namespace: $NS_FRONTEND
 spec:
   podSelector:
     matchLabels:
@@ -277,7 +451,7 @@ spec:
   policyTypes:
   - Egress
   egress:
-  # Allow DNS
+  # Allow DNS resolution
   - to:
     - namespaceSelector:
         matchLabels:
@@ -288,7 +462,7 @@ spec:
     ports:
     - protocol: UDP
       port: 53
-  # Allow to backend
+  # Allow traffic to backend
   - to:
     - namespaceSelector:
         matchLabels:
@@ -299,26 +473,33 @@ spec:
     ports:
     - protocol: TCP
       port: 80
+EOF
+
+# Verify policy creation
+kubectl get networkpolicy -n $NS_FRONTEND
 ```
 
-Apply:
+### Test Selective Egress
+
 ```bash
-kubectl apply -f allow-egress-frontend.yaml
+# Frontend → backend should work now (DNS + HTTP allowed)
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  curl http://backend.$NS_BACKEND.svc.cluster.local
+
+# Frontend → internet should still fail (not in egress rules)
+kubectl exec -it frontend -n $NS_FRONTEND -- \
+  curl -m 5 https://www.google.com
 ```
 
-Test:
+**Expected:** Frontend can reach backend, but external traffic remains blocked.
+
+---
+
+## 14. Create Default Deny-All Template (Reusable)
+
 ```bash
-# Should work
-kubectl exec -it frontend -n frontend -- curl http://backend.backend.svc.cluster.local
-
-# Should still fail (no external egress)
-kubectl exec -it frontend -n frontend -- curl -m 5 https://www.google.com
-```
-
-### 12. Create Default Deny-All Template
-Create a reusable template `default-deny-all.yaml`:
-
-```yaml
+# Create a reusable deny-all policy template (both ingress and egress)
+cat <<'EOF' > /tmp/default-deny-all.yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -328,108 +509,55 @@ spec:
   policyTypes:
   - Ingress
   - Egress
-```
+EOF
 
-Apply to multiple namespaces:
-```bash
-for ns in frontend backend database; do
-  kubectl apply -f default-deny-all.yaml -n $ns
+# Apply to all application namespaces
+for ns in $NS_FRONTEND $NS_BACKEND $NS_DATABASE; do
+  kubectl apply -f /tmp/default-deny-all.yaml -n $ns
 done
+
+# View all network policies
+kubectl get networkpolicies --all-namespaces
 ```
 
-### 13. View Network Policies
+---
+
+## 15. View and Inspect Network Policies
+
 ```bash
-# List all network policies
+# List all network policies across all namespaces
 kubectl get networkpolicies --all-namespaces
 
-# Describe specific policy
-kubectl describe networkpolicy deny-all-ingress -n database
+# Describe specific policy in database namespace
+kubectl describe networkpolicy deny-all-ingress -n $NS_DATABASE
 
-# View in YAML
-kubectl get networkpolicy allow-backend-to-database -n database -o yaml
+# View allow-backend-to-database policy in YAML format
+kubectl get networkpolicy allow-backend-to-database -n $NS_DATABASE -o yaml
+
+# Show policy details for frontend namespace
+kubectl describe networkpolicy -n $NS_FRONTEND
 ```
 
-### 14. Test Complex Scenario
-Deploy a multi-tier application:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: web
-  namespace: frontend
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: web
-      tier: frontend
-  template:
-    metadata:
-      labels:
-        app: web
-        tier: frontend
-    spec:
-      containers:
-      - name: nginx
-        image: nginx
-        ports:
-        - containerPort: 80
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: web
-  namespace: frontend
-spec:
-  selector:
-    app: web
-  ports:
-  - port: 80
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-web-ingress
-  namespace: frontend
-spec:
-  podSelector:
-    matchLabels:
-      app: web
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    - podSelector: {}  # Allow from same namespace
-    ports:
-    - protocol: TCP
-      port: 80
-  - from:  # Allow from ingress controller
-    - namespaceSelector:
-        matchLabels:
-          name: ingress-nginx
-    ports:
-    - protocol: TCP
-      port: 80
-```
 
-### 15. Allow External Egress for Specific Pods
-Create `allow-external-egress.yaml`:
+## 16. Allow External Egress for Specific Workloads
 
-```yaml
+```bash
+# Create policy allowing external HTTPS egress for backend API pods
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-external-egress
-  namespace: backend
+  namespace: $NS_BACKEND
 spec:
   podSelector:
     matchLabels:
-      app: api-gateway
+      tier: backend
   policyTypes:
   - Egress
   egress:
-  # Allow DNS
+  # Allow DNS resolution
   - to:
     - namespaceSelector:
         matchLabels:
@@ -437,84 +565,182 @@ spec:
     ports:
     - protocol: UDP
       port: 53
-  # Allow HTTPS to any destination
-  - to:
-    - namespaceSelector: {}
-    - podSelector: {}
-    ports:
-    - protocol: TCP
-      port: 443
-  # Allow to internet (CIDR blocks)
+  # Allow HTTPS to external destinations (with exceptions)
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
         except:
-        - 169.254.169.254/32  # Exclude metadata service
+        - 169.254.169.254/32  # Exclude Azure metadata service
+        - 10.0.0.0/8          # Exclude private networks
+        - 172.16.0.0/12
+        - 192.168.0.0/16
     ports:
     - protocol: TCP
       port: 443
+EOF
+
+# Verify policy creation
+kubectl get networkpolicy -n $NS_BACKEND
 ```
 
-### 16. Audit Network Policy Compliance
-Create a test pod for validation:
+---
+
+## 17. Test Network Policy with Validation Pod
 
 ```bash
-# Create test pod in frontend
+# Create test pod with network tools for validation
 kubectl run test-network \
-  --image=nicolaka/netshoot \
-  --labels=app=test \
-  -n frontend \
+  --image=nicolaka/netshoot `# Network troubleshooting tools` \
+  --labels=app=test,tier=frontend `# Match frontend tier` \
+  -n $NS_FRONTEND \
   -- sleep 3600
 
-# Test various connections
-kubectl exec -it test-network -n frontend -- curl -m 5 http://backend.backend.svc.cluster.local
-kubectl exec -it test-network -n frontend -- curl -m 5 http://database.database.svc.cluster.local:5432
-kubectl exec -it test-network -n frontend -- nslookup kubernetes.default
+# Wait for pod to be ready
+kubectl wait --for=condition=ready \
+  --timeout=60s \
+  pod/test-network \
+  -n $NS_FRONTEND
+
+# Test backend connectivity (should work with allow policy)
+kubectl exec -it test-network -n $NS_FRONTEND -- \
+  curl -m 5 http://backend.$NS_BACKEND.svc.cluster.local
+
+# Test database connectivity (should fail - not allowed)
+kubectl exec -it test-network -n $NS_FRONTEND -- \
+  nc -zv -w 5 database.$NS_DATABASE.svc.cluster.local 5432
+
+# Test DNS resolution (should work if DNS egress allowed)
+kubectl exec -it test-network -n $NS_FRONTEND -- \
+  nslookup kubernetes.default
 ```
+
+---
 
 ## Expected Results
-- All traffic denied by default with deny-all policies
-- Specific allow rules enable required communication paths
-- Pod-to-pod isolation works across namespaces
-- DNS traffic must be explicitly allowed in egress policies
-- Network policies are namespace-scoped
-- Ingress and egress can be controlled independently
-- External traffic can be restricted using CIDR blocks
+
+✅ All traffic denied by default with deny-all policies  
+✅ Specific allow rules enable required communication paths  
+✅ Pod-to-pod isolation enforced across namespaces  
+✅ DNS traffic explicitly allowed in egress policies  
+✅ Backend can access database; frontend cannot  
+✅ Frontend can access backend via HTTP  
+✅ External traffic blocked unless explicitly allowed  
+✅ Network policies are additive and namespace-scoped  
+
+---
 
 ## Cleanup
+
+### Option 1: Delete Kubernetes Resources Only
 ```bash
-kubectl delete namespace frontend backend database
+# Delete all test namespaces and network policies
+kubectl delete namespace $NS_FRONTEND $NS_BACKEND $NS_DATABASE
 ```
 
-## Key Takeaways
-- **Default deny** is security best practice
-- Network policies are **additive** (multiple policies combine)
-- **Empty podSelector** `{}` matches all pods in namespace
-- **Ingress** controls incoming traffic; **Egress** controls outgoing
-- DNS must be explicitly allowed in egress policies
-- Policies are **namespace-scoped**
-- Both source and destination rules can use pod/namespace selectors
-- **IPBlock** allows CIDR-based rules for external traffic
-- Policies apply at the pod level, not service level
+### Option 2: Delete Entire Resource Group (Complete Cleanup)
+```bash
+# Delete entire resource group (removes cluster and all resources)
+az group delete \
+  --name $RESOURCE_GROUP `# Target resource group` \
+  --yes `# Skip confirmation` \
+  --no-wait `# Run asynchronously`
+```
 
-## Network Policy Pattern: Defense in Depth
+---
+
+## Key Takeaways
+
+- **Default-deny** is the security best practice (start with deny-all, then allowlist)
+- Network policies are **additive** - multiple policies combine to allow traffic
+- **Empty podSelector** `{}` matches all pods in the namespace
+- **Ingress** controls incoming traffic; **Egress** controls outgoing traffic
+- **DNS must be explicitly allowed** in egress policies (kube-system/kube-dns)
+- Policies are **namespace-scoped** and apply to pods, not services
+- **Both** source and destination rules can use pod/namespace selectors
+- **IPBlock** allows CIDR-based rules for external traffic control
+- Network policies apply at the **pod level**, not service level
+- **Azure CNI** is required for network policies in AKS
+- Policies only affect **new connections**, not established ones
+
+---
+
+## How This Connects to Zero-Trust Networking
+
+This lab demonstrates **microsegmentation** in Kubernetes:
+
+### Network Policy Enforcement Flow:
 
 ```
 ┌─────────────────────────────────────────┐
-│  1. Deny all ingress + egress          │ ← Start here
-├─────────────────────────────────────────┤
-│  2. Allow DNS (kube-dns)               │ ← Essential
-├─────────────────────────────────────────┤
-│  3. Allow app-specific pod-to-pod      │ ← Whitelist
-├─────────────────────────────────────────┤
-│  4. Allow external egress (if needed)  │ ← Minimal
+│  Kubernetes Network Policy              │
+│  (Default-Deny + Allowlist)             │
+│                                         │
+│  ┌──────────────────────────────────┐  │
+│  │ 1. Deny All Ingress + Egress     │  │ ← Start here (zero-trust)
+│  ├──────────────────────────────────┤  │
+│  │ 2. Allow DNS (kube-system)       │  │ ← Essential for name resolution
+│  ├──────────────────────────────────┤  │
+│  │ 3. Allow App-to-App (Whitelist)  │  │ ← Explicit service mesh
+│  ├──────────────────────────────────┤  │
+│  │ 4. Allow External (Minimal)      │  │ ← Least privilege
+│  └──────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────┐
+│     Traffic Flow Validation             │
+│                                         │
+│  Frontend ──✓──> Backend (HTTP:80)     │
+│  Frontend ──✗──> Database (5432)       │
+│  Backend  ──✓──> Database (5432)       │
+│  All      ──✗──> Internet (blocked)    │
 └─────────────────────────────────────────┘
 ```
 
+### Enterprise Use Cases:
+
+| Pattern | Implementation | Benefit |
+|---------|---------------|---------|
+| **Multi-tenancy** | Namespace isolation with deny-all | Prevent cross-tenant traffic |
+| **Microservices** | Selective pod-to-pod allowlist | Service-to-service security |
+| **Data tier protection** | Database namespace restrictions | Limit database access to backend only |
+| **Egress control** | Block internet by default | Prevent data exfiltration |
+| **Compliance** | Network segmentation logs | Audit trail for security policies |
+
+---
+
+## Network Policy Best Practices
+
+| Practice | Implementation | Rationale |
+|----------|---------------|-----------|
+| **Start with deny-all** | Apply to all namespaces | Zero-trust foundation |
+| **Explicit DNS egress** | Allow kube-system/kube-dns | Required for service discovery |
+| **Label namespaces** | Use consistent naming | Enable namespace selectors |
+| **Use pod labels** | tier=frontend/backend/database | Granular policy targeting |
+| **CIDR exceptions** | Exclude metadata service | Prevent cloud platform access |
+| **Test incrementally** | Add one allow rule at a time | Easier troubleshooting |
+| **Document policies** | Annotate with business logic | Maintainability |
+
+---
+
 ## Troubleshooting
-- **Policies not working**: Check if network policy provider is enabled
-- **DNS not working**: Add explicit DNS egress rule to kube-system/kube-dns
-- **Connectivity issues**: Use `kubectl describe networkpolicy` to verify rules
-- **Conflicts**: Remember policies are additive; check all policies affecting a pod
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| **Policies not enforced** | Network policy provider not enabled | Verify `--network-policy azure` in AKS cluster |
+| **DNS resolution fails** | Missing DNS egress rule | Add explicit allow to kube-system/kube-dns on UDP:53 |
+| **Connectivity timeout** | Too restrictive deny-all | Check policy order, ensure allow rules exist |
+| **Existing connections work** | Policies apply to new connections | Restart pods to apply policies |
+| **Wrong pod/namespace match** | Incorrect label selectors | Use `kubectl describe networkpolicy` to verify |
+| **Azure CNI required** | Using kubenet | Recreate cluster with `--network-plugin azure` |
+
+---
+
+## Additional Resources
+
+- [Kubernetes Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
+- [Azure Network Policy Manager](https://learn.microsoft.com/azure/aks/use-network-policies)
+- [AKS Network Concepts](https://learn.microsoft.com/azure/aks/concepts-network)
+- [Calico Network Policy](https://docs.projectcalico.org/security/calico-network-policy)
 
 ---
