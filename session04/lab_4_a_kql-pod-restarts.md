@@ -1,4 +1,5 @@
 # Lab 4a: KQL Pod Restarts Analysis
+<img width="800" height="313" alt="ZIMAGE" src="https://github.com/user-attachments/assets/18f877bb-d9ed-4fba-8de2-3e3306e90cb8" />
 
 ## Objective
 Analyze pod restarts, failures, and resource issues in AKS using **Azure Monitor Container Insights** and **Kusto Query Language (KQL)** to identify problematic workloads and root causes.
