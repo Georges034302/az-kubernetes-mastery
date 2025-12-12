@@ -1,58 +1,156 @@
-# Lab 3e: Ingress Routing
+# Lab 3e: Ingress Routing with NGINX Ingress Controller
 
 ## Objective
-Deploy NGINX Ingress and configure dynamic path-based routing.
+Deploy **NGINX Ingress Controller** on AKS and configure comprehensive Layer 7 routing: path-based routing, host-based routing, URL rewriting, TLS/SSL termination, rate limiting, basic authentication, CORS, and canary deployments.
 
 ## Prerequisites
-- AKS cluster running
+- Azure CLI installed and authenticated
 - `kubectl` and Helm 3 installed
-- DNS name or domain for testing (optional)
+- Sufficient Azure subscription quota for AKS
 
-## Steps
+---
 
-### 1. Install NGINX Ingress Controller
-Add Helm repository:
+## 1. Set Lab Parameters
 
 ```bash
+# Azure resource configuration
+RESOURCE_GROUP="rg-aks-ingress-lab"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-ingress-demo"
+
+# AKS cluster configuration
+NODE_COUNT=3
+NODE_VM_SIZE="Standard_DS2_v2"
+K8S_VERSION="1.28"
+
+# Ingress configuration
+INGRESS_NAMESPACE="ingress-nginx"
+INGRESS_REPLICAS=2
+APP_NAMESPACE="default"
+
+# Application configuration
+FRONTEND_APP="frontend-app"
+API_APP="api-app"
+ADMIN_APP="admin-app"
+
+# Domain configuration (for testing)
+DOMAIN="example.com"
+FRONTEND_HOST="frontend.$DOMAIN"
+API_HOST="api.$DOMAIN"
+ADMIN_HOST="admin.$DOMAIN"
+
+# Display all configuration
+echo "=== Lab Configuration ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Ingress Namespace: $INGRESS_NAMESPACE"
+echo "Ingress Replicas: $INGRESS_REPLICAS"
+echo "Domains: $FRONTEND_HOST, $API_HOST, $ADMIN_HOST"
+echo "========================="
+```
+
+---
+
+## 2. Create Resource Group and AKS Cluster
+
+```bash
+# Create resource group
+RG_RESULT=$(az group create \
+  --name $RESOURCE_GROUP `# Resource group name` \
+  --location $LOCATION `# Azure region` \
+  --query 'properties.provisioningState' \
+  --output tsv)
+
+echo "Resource Group: $RG_RESULT"
+
+# Create AKS cluster (7-12 minutes)
+CLUSTER_RESULT=$(az aks create \
+  --resource-group $RESOURCE_GROUP `# Target resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --location $LOCATION `# Azure region` \
+  --node-count $NODE_COUNT `# Initial node count` \
+  --node-vm-size $NODE_VM_SIZE `# Node VM size` \
+  --kubernetes-version $K8S_VERSION `# K8s version` \
+  --enable-managed-identity `# Use system-assigned managed identity` \
+  --generate-ssh-keys `# Auto-generate SSH keys` \
+  --query 'provisioningState' \
+  --output tsv)
+
+echo "AKS Cluster: $CLUSTER_RESULT"
+
+# Get AKS credentials
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP `# Source resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --overwrite-existing `# Replace existing kubeconfig entry` \
+  --output none
+
+# Verify cluster connectivity
+echo "Current kubectl context: $(kubectl config current-context)"
+kubectl get nodes
+```
+
+---
+
+## 3. Install NGINX Ingress Controller
+
+```bash
+# Add NGINX Ingress Helm repository
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
 helm repo update
-```
 
-Create namespace:
-```bash
-kubectl create namespace ingress-nginx
-```
+# Create namespace for ingress controller
+kubectl create namespace $INGRESS_NAMESPACE
 
-Install NGINX Ingress:
-```bash
+# Install NGINX Ingress Controller
 helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx \
-  --set controller.replicaCount=2 \
-  --set controller.nodeSelector."kubernetes\.io/os"=linux \
-  --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz
+  --namespace $INGRESS_NAMESPACE `# Ingress namespace` \
+  --set controller.replicaCount=$INGRESS_REPLICAS `# Number of replicas` \
+  --set controller.nodeSelector."kubernetes\.io/os"=linux `# Linux nodes` \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz `# Health probe path`
+
+# Wait for ingress controller to be ready
+kubectl wait --namespace $INGRESS_NAMESPACE \
+  --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller \
+  --timeout=120s
+
+# Verify installation
+kubectl get pods -n $INGRESS_NAMESPACE
+kubectl get services -n $INGRESS_NAMESPACE
+
+# Get ingress controller LoadBalancer IP (wait for assignment)
+kubectl get service ingress-nginx-controller -n $INGRESS_NAMESPACE --watch
 ```
 
-Verify installation:
+**Press Ctrl+C once EXTERNAL-IP appears.**
+
+### Capture Ingress IP
+
 ```bash
-kubectl get pods -n ingress-nginx
-kubectl get services -n ingress-nginx
+# Get ingress controller public IP
+INGRESS_IP=$(kubectl get service ingress-nginx-controller \
+  -n $INGRESS_NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "Ingress Controller IP: $INGRESS_IP"
 ```
 
-Get LoadBalancer IP:
+---
+
+## 4. Deploy Backend Applications
+
+### Frontend Application
+
 ```bash
-kubectl get service ingress-nginx-controller -n ingress-nginx --watch
-```
-
-### 2. Deploy Backend Applications
-Create multiple backend services for routing demo.
-
-**App 1 - Frontend:**
-```yaml
+# Deploy frontend application
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: frontend-app
-  namespace: default
+  name: $FRONTEND_APP
+  namespace: $APP_NAMESPACE
 spec:
   replicas: 2
   selector:
@@ -89,22 +187,30 @@ apiVersion: v1
 kind: Service
 metadata:
   name: frontend-service
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
   selector:
     app: frontend
   ports:
   - port: 80
     targetPort: 80
+EOF
+
+# Wait for frontend deployment
+kubectl rollout status deployment/$FRONTEND_APP -n $APP_NAMESPACE --timeout=120s
+kubectl get pods -n $APP_NAMESPACE -l app=frontend
 ```
 
-**App 2 - API:**
-```yaml
+### API Application
+
+```bash
+# Deploy API application
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-app
-  namespace: default
+  name: $API_APP
+  namespace: $APP_NAMESPACE
 spec:
   replicas: 2
   selector:
@@ -125,14 +231,6 @@ spec:
           mountPath: /usr/share/nginx/html
       initContainers:
       - name: setup
-        image: busybox
-        command:
-        - sh
-        - -c
-        - echo "<h1>API Service</h1><p>Endpoint: /api/v1</p>" > /html/index.html
-        volumeMounts:
-        - name: html
-          mountPath: /html
       volumes:
       - name: html
         emptyDir: {}
@@ -141,14 +239,30 @@ apiVersion: v1
 kind: Service
 metadata:
   name: api-service
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
   selector:
     app: api
   ports:
   - port: 80
     targetPort: 80
+EOF
+
+# Wait for API deployment
+kubectl rollout status deployment/$API_APP -n $APP_NAMESPACE --timeout=120s
+kubectl get pods -n $APP_NAMESPACE -l app=api
 ```
+
+### Admin Application
+
+```bash
+# Deploy admin application
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $ADMIN_APP
+  namespace: $APP_NAMESPACE
 
 **App 3 - Admin:**
 ```yaml
@@ -169,22 +283,6 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: nginx:alpine
-        ports:
-        - containerPort: 80
-        volumeMounts:
-        - name: html
-          mountPath: /usr/share/nginx/html
-      initContainers:
-      - name: setup
-        image: busybox
-        command:
-        - sh
-        - -c
-        - echo "<h1>Admin Dashboard</h1><p>Protected Area</p>" > /html/index.html
-        volumeMounts:
-        - name: html
-          mountPath: /html
       volumes:
       - name: html
         emptyDir: {}
@@ -193,8 +291,23 @@ apiVersion: v1
 kind: Service
 metadata:
   name: admin-service
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
+  selector:
+    app: admin
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+
+# Wait for admin deployment
+kubectl rollout status deployment/$ADMIN_APP -n $APP_NAMESPACE --timeout=120s
+kubectl get pods -n $APP_NAMESPACE -l app=admin
+```
+
+---
+
+## 5. Create Path-Based Routing Ingress
   selector:
     app: admin
   ports:
@@ -266,19 +379,22 @@ curl http://$INGRESS_IP/api
 curl http://$INGRESS_IP/admin
 ```
 
-### 5. Create Host-Based Routing
-Create `host-based-ingress.yaml`:
+---
 
-```yaml
+## 6. Create Host-Based Routing
+
+```bash
+# Create ingress with host-based routing
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: host-ingress
-  namespace: default
+  namespace: $APP_NAMESPACE
 spec:
   ingressClassName: nginx
   rules:
-  - host: frontend.example.com
+  - host: $FRONTEND_HOST
     http:
       paths:
       - path: /
@@ -288,7 +404,7 @@ spec:
             name: frontend-service
             port:
               number: 80
-  - host: api.example.com
+  - host: $API_HOST
     http:
       paths:
       - path: /
@@ -298,7 +414,7 @@ spec:
             name: api-service
             port:
               number: 80
-  - host: admin.example.com
+  - host: $ADMIN_HOST
     http:
       paths:
       - path: /
@@ -308,53 +424,59 @@ spec:
             name: admin-service
             port:
               number: 80
+EOF
+
+# Verify host-based ingress
+kubectl get ingress host-ingress -n $APP_NAMESPACE
 ```
 
-Apply:
+### Test Host-Based Routing
+
 ```bash
-kubectl apply -f host-based-ingress.yaml
+# Test with host headers
+curl -H "Host: $FRONTEND_HOST" http://$INGRESS_IP
+curl -H "Host: $API_HOST" http://$INGRESS_IP
+curl -H "Host: $ADMIN_HOST" http://$INGRESS_IP
 ```
 
-Test with host headers:
-```bash
-curl -H "Host: frontend.example.com" http://$INGRESS_IP
-curl -H "Host: api.example.com" http://$INGRESS_IP
-curl -H "Host: admin.example.com" http://$INGRESS_IP
-```
+---
 
-### 6. Configure SSL/TLS with Self-Signed Certificate
-Create self-signed certificate:
+## 7. Configure SSL/TLS with Self-Signed Certificate
 
 ```bash
+# Generate self-signed certificate
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout tls.key \
-  -out tls.crt \
-  -subj "/CN=*.example.com/O=example"
+  -keyout tls.key `# Private key file` \
+  -out tls.crt `# Certificate file` \
+  -subj "/CN=*.$DOMAIN/O=example" `# Wildcard certificate`
 
-# Create Kubernetes secret
+# Create Kubernetes TLS secret
 kubectl create secret tls example-tls \
-  --cert=tls.crt \
-  --key=tls.key
-```
+  --cert=tls.crt `# Certificate file` \
+  --key=tls.key `# Private key file` \
+  -n $APP_NAMESPACE
 
-Create `tls-ingress.yaml`:
-```yaml
+# Verify secret creation
+kubectl get secret example-tls -n $APP_NAMESPACE
+
+# Create TLS-enabled ingress
+cat <<EOF | kubectl apply -f -
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: tls-ingress
-  namespace: default
+  namespace: $APP_NAMESPACE
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - frontend.example.com
-    - api.example.com
+    - $FRONTEND_HOST
+    - $API_HOST
     secretName: example-tls
   rules:
-  - host: frontend.example.com
+  - host: $FRONTEND_HOST
     http:
       paths:
       - path: /
@@ -364,7 +486,7 @@ spec:
             name: frontend-service
             port:
               number: 80
-  - host: api.example.com
+  - host: $API_HOST
     http:
       paths:
       - path: /
@@ -374,18 +496,23 @@ spec:
             name: api-service
             port:
               number: 80
+EOF
+
+# Verify TLS ingress
+kubectl describe ingress tls-ingress -n $APP_NAMESPACE
 ```
 
-Apply and test:
+### Test HTTPS Access
+
 ```bash
-kubectl apply -f tls-ingress.yaml
-
-curl -k -H "Host: frontend.example.com" https://$INGRESS_IP
-curl -k -H "Host: api.example.com" https://$INGRESS_IP
+# Test HTTPS (use -k to accept self-signed certificate)
+curl -k -H "Host: $FRONTEND_HOST" https://$INGRESS_IP
+curl -k -H "Host: $API_HOST" https://$INGRESS_IP
 ```
 
-### 7. Configure URL Rewriting
-Create `rewrite-ingress.yaml`:
+---
+
+## 8. Configure URL Rewriting
 
 ```yaml
 apiVersion: networking.k8s.io/v1
