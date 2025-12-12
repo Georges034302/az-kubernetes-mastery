@@ -1,4 +1,5 @@
 # Lab 5d: Kiali and Jaeger Observability
+<img width="1509" height="814" alt="ZIMAGE" src="https://github.com/user-attachments/assets/8119010c-c9fd-4628-903f-99438312dd3f" />
 
 ## Objective
 Deploy and configure Kiali for service mesh visualization and Jaeger for distributed tracing on AKS with Istio. Master observability tools to monitor microservices traffic, analyze service topology, and trace request flows across the mesh.
