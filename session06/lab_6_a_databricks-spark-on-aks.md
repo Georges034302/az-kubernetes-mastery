@@ -1,4 +1,5 @@
 # Lab 6a: Databricks Spark on AKS
+<img width="1438" height="915" alt="ZIMAGE" src="https://github.com/user-attachments/assets/9d2c0c27-ec2d-49f2-8d4d-261a3f221324" />
 
 ## Objective
 Deploy Azure Databricks and configure it to run Apache Spark workloads on Azure Kubernetes Service (AKS). Master the integration between Databricks and AKS for scalable, cost-effective Spark job execution with dynamic resource allocation and Azure storage integration.
