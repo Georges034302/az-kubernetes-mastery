@@ -1,4 +1,5 @@
 # Lab 3f: Defender Egress Validation
+<img width="800" height="352" alt="ZIMAGE" src="https://github.com/user-attachments/assets/b73c36ae-a611-4f8a-95c7-6a079751b67a" />
 
 ## Objective
 Validate AKS egress security posture using **Azure Firewall**, **User-Defined Routes (UDR)**, and **Microsoft Defender for Containers** by simulating allowed, blocked, and malicious outbound traffic.
