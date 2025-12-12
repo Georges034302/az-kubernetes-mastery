@@ -1,4 +1,5 @@
 # Lab 5a: Helm Package and Deploy
+![ZIMAGE](https://github.com/user-attachments/assets/4630ed7d-c89f-488b-a510-8809f8470cf4)
 
 ## Objective
 Learn to create, package, and deploy a custom Helm chart to AKS with a containerized application using Azure Container Registry (ACR).
