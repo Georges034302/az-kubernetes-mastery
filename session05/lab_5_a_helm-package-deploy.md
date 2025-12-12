@@ -215,22 +215,6 @@ cd ..
 helm create $CHART_NAME  # `Create new Helm chart`
 ```
 
-Helm chart structure:
-```
-myapp/
-├── Chart.yaml          # Chart metadata
-├── values.yaml         # Default configuration values
-├── charts/             # Chart dependencies
-├── templates/          # Kubernetes manifest templates
-│   ├── deployment.yaml
-│   ├── service.yaml
-│   ├── ingress.yaml
-│   ├── _helpers.tpl
-│   ├── NOTES.txt
-│   └── tests/
-└── .helmignore
-```
-
 ---
 
 ## Step 8: Customize Chart Metadata
@@ -498,7 +482,6 @@ rm -rf $APP_NAME $CHART_NAME helm-repo rendered-manifests.yaml
 ```
 
 ---
-
 
 ## How This Connects to Kubernetes Package Management
 
