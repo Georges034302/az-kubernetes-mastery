@@ -1,4 +1,5 @@
 # Lab 3c: Network Policy - Deny All (Default-Deny Security Model)
+![ZIMAGE](https://github.com/user-attachments/assets/d227cf78-0b0d-4d3f-90ee-f30dda2dfd09)
 
 ## Objective
 Implement **default-deny network policies** in AKS using the zero-trust security model. Demonstrate pod-to-pod isolation, namespace segmentation, and selective traffic allowlisting based on application requirements.
