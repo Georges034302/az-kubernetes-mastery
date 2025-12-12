@@ -1,4 +1,5 @@
 # Lab 3e: Ingress Routing with NGINX Ingress Controller
+<img width="761" height="484" alt="ZIMAGE" src="https://github.com/user-attachments/assets/118bd632-780e-4a57-a29a-5b401cca7cd6" />
 
 ## Objective
 Deploy **NGINX Ingress Controller** on AKS and configure comprehensive Layer 7 routing: path-based routing, host-based routing, URL rewriting, TLS/SSL termination, rate limiting, basic authentication, CORS, and canary deployments.
