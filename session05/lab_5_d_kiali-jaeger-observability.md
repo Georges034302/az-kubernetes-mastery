@@ -1,97 +1,179 @@
 # Lab 5d: Kiali and Jaeger Observability
 
 ## Objective
-Visualize service mesh topology with Kiali and trace requests with Jaeger.
+Deploy and configure Kiali for service mesh visualization and Jaeger for distributed tracing on AKS with Istio. Master observability tools to monitor microservices traffic, analyze service topology, and trace request flows across the mesh.
 
-## Prerequisites
-- AKS cluster running
-- Istio installed (from Lab 5c)
-- `kubectl` configured
-- Sample application deployed in mesh
-
-## Steps
-
-### 1. Install Kiali
-```bash
-# Install Kiali operator
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/kiali.yaml
-
-# Wait for Kiali to be ready
-kubectl rollout status deployment/kiali -n istio-system
-
-# Verify installation
-kubectl get pods -n istio-system -l app=kiali
-kubectl get svc -n istio-system -l app=kiali
-```
-
-### 2. Access Kiali Dashboard
-```bash
-# Port forward to Kiali
-kubectl port-forward svc/kiali -n istio-system 20001:20001
-
-# Access dashboard at: http://localhost:20001
-# Default credentials: admin/admin (if auth enabled)
-```
-
-Alternative - using istioctl:
-```bash
-istioctl dashboard kiali
-```
-
-### 3. Install Jaeger
-```bash
-# Install Jaeger
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/jaeger.yaml
-
-# Wait for Jaeger to be ready
-kubectl rollout status deployment/jaeger -n istio-system
-
-# Verify installation
-kubectl get pods -n istio-system -l app=jaeger
-```
-
-### 4. Access Jaeger UI
-```bash
-# Port forward to Jaeger
-kubectl port-forward svc/tracing -n istio-system 16686:80
-
-# Access UI at: http://localhost:16686
-```
-
-Alternative:
-```bash
-istioctl dashboard jaeger
-```
-
-### 5. Install Prometheus and Grafana
-```bash
-# Install Prometheus (Kiali dependency)
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/prometheus.yaml
-
-# Install Grafana for metrics visualization
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/grafana.yaml
-
-# Wait for deployments
-kubectl rollout status deployment/prometheus -n istio-system
-kubectl rollout status deployment/grafana -n istio-system
-```
-
-### 6. Deploy Multi-Service Application
-Create `microservices-app.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: observability-demo
-  labels:
-    istio-injection: enabled
 ---
+
+## Lab Parameters
+
+Set these variables at the start:
+
+```bash
+# Azure Resources
+RESOURCE_GROUP="rg-aks-istio-observability"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-istio-obs-cluster"
+NODE_COUNT=3
+NODE_SIZE="Standard_D4s_v3"
+K8S_VERSION="1.28"
+
+# Istio Configuration
+ISTIO_VERSION="1.20"
+ISTIO_NS="istio-system"
+APP_NS="observability-demo"
+
+# Application Configuration
+FRONTEND_IMAGE="gcr.io/google-samples/microservices-demo/frontend:v0.8.0"
+PRODUCTCATALOG_IMAGE="gcr.io/google-samples/microservices-demo/productcatalogservice:v0.8.0"
+RECOMMENDATION_IMAGE="gcr.io/google-samples/microservices-demo/recommendationservice:v0.8.0"
+
+# Observability Tools
+SAMPLING_RATE="100.0"
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \      # `Resource group name`
+  --location $LOCATION          # `Azure region (Sydney, Australia)`
+```
+
+---
+
+## Step 2: Create AKS Cluster
+
+```bash
+az aks create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $CLUSTER_NAME \                   # `Cluster name`
+  --location $LOCATION \                   # `Region`
+  --node-count $NODE_COUNT \               # `Number of nodes`
+  --node-vm-size $NODE_SIZE \              # `VM size (4 vCPU, 16GB for Istio)`
+  --kubernetes-version $K8S_VERSION \      # `Kubernetes version`
+  --enable-managed-identity \              # `Use managed identity`
+  --generate-ssh-keys \                    # `Generate SSH keys`
+  --network-plugin azure \                 # `Azure CNI networking`
+  --no-wait                                # `Don't wait for completion`
+
+az aks wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --created                                # `Wait for cluster creation`
+
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing                     # `Configure kubectl`
+```
+
+---
+
+## Step 3: Install Istio
+
+Download Istio:
+```bash
+curl -L https://istio.io/downloadIstio | \
+  ISTIO_VERSION=$ISTIO_VERSION sh -      # `Download specific version`
+
+export PATH=$PWD/istio-$ISTIO_VERSION/bin:$PATH  # `Add istioctl to PATH`
+
+echo "Istio $ISTIO_VERSION installed"
+```
+
+Install Istio control plane:
+```bash
+istioctl install \
+  --set profile=demo \                   # `Demo profile (all features)`
+  -y                                     # `Skip confirmation`
+
+echo "Istio control plane installed"
+```
+
+---
+
+## Step 4: Create Application Namespace
+
+```bash
+kubectl create namespace $APP_NS         # `Create namespace`
+
+kubectl label namespace $APP_NS \
+  istio-injection=enabled                # `Enable automatic sidecar injection`
+
+kubectl get namespace $APP_NS --show-labels  # `Verify label`
+
+echo "Namespace $APP_NS created with Istio injection enabled"
+```
+
+---
+
+## Step 5: Install Observability Tools
+
+Install Kiali:
+```bash
+kubectl apply \
+  -f samples/addons/kiali.yaml           # `Kiali service mesh dashboard`
+
+kubectl rollout status \
+  deployment/kiali \
+  --namespace $ISTIO_NS \
+  --timeout=300s                         # `Wait for Kiali to be ready`
+```
+
+Install Jaeger:
+```bash
+kubectl apply \
+  -f samples/addons/jaeger.yaml          # `Jaeger distributed tracing`
+
+kubectl rollout status \
+  deployment/jaeger \
+  --namespace $ISTIO_NS \
+  --timeout=300s                         # `Wait for Jaeger to be ready`
+```
+
+Install Prometheus:
+```bash
+kubectl apply \
+  -f samples/addons/prometheus.yaml      # `Metrics collection`
+
+kubectl rollout status \
+  deployment/prometheus \
+  --namespace $ISTIO_NS \
+  --timeout=300s                         # `Wait for Prometheus to be ready`
+```
+
+Install Grafana:
+```bash
+kubectl apply \
+  -f samples/addons/grafana.yaml         # `Metrics visualization`
+
+kubectl rollout status \
+  deployment/grafana \
+  --namespace $ISTIO_NS \
+  --timeout=300s                         # `Wait for Grafana to be ready`
+```
+
+Verify all addons:
+```bash
+kubectl get pods --namespace $ISTIO_NS | grep -E "kiali|jaeger|prometheus|grafana"  # `Check addon pods`
+
+echo "All observability tools installed"
+```
+
+---
+
+## Step 6: Deploy Multi-Service Application
+
+Deploy frontend service:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
   name: frontend
-  namespace: observability-demo
 spec:
   selector:
     app: frontend
@@ -104,13 +186,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend
-  namespace: observability-demo
 spec:
   replicas: 2
   selector:
     matchLabels:
       app: frontend
-      version: v1
   template:
     metadata:
       labels:
@@ -119,7 +199,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: gcr.io/google-samples/microservices-demo/frontend:v0.8.0
+        image: $FRONTEND_IMAGE
         ports:
         - containerPort: 8080
         env:
@@ -127,18 +207,8 @@ spec:
           value: "8080"
         - name: PRODUCT_CATALOG_SERVICE_ADDR
           value: "productcatalog:3550"
-        - name: CURRENCY_SERVICE_ADDR
-          value: "currency:7000"
-        - name: CART_SERVICE_ADDR
-          value: "cart:7070"
         - name: RECOMMENDATION_SERVICE_ADDR
           value: "recommendation:8080"
-        - name: SHIPPING_SERVICE_ADDR
-          value: "shipping:50051"
-        - name: CHECKOUT_SERVICE_ADDR
-          value: "checkout:5050"
-        - name: AD_SERVICE_ADDR
-          value: "adservice:9555"
         resources:
           requests:
             cpu: 100m
@@ -146,12 +216,16 @@ spec:
           limits:
             cpu: 200m
             memory: 128Mi
----
+EOF
+```
+
+Deploy product catalog service:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
   name: productcatalog
-  namespace: observability-demo
 spec:
   selector:
     app: productcatalog
@@ -164,7 +238,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: productcatalog
-  namespace: observability-demo
 spec:
   replicas: 1
   selector:
@@ -178,7 +251,7 @@ spec:
     spec:
       containers:
       - name: server
-        image: gcr.io/google-samples/microservices-demo/productcatalogservice:v0.8.0
+        image: $PRODUCTCATALOG_IMAGE
         ports:
         - containerPort: 3550
         env:
@@ -191,12 +264,16 @@ spec:
           limits:
             cpu: 200m
             memory: 128Mi
----
+EOF
+```
+
+Deploy recommendation service:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: v1
 kind: Service
 metadata:
   name: recommendation
-  namespace: observability-demo
 spec:
   selector:
     app: recommendation
@@ -209,7 +286,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: recommendation
-  namespace: observability-demo
 spec:
   replicas: 1
   selector:
@@ -223,7 +299,7 @@ spec:
     spec:
       containers:
       - name: server
-        image: gcr.io/google-samples/microservices-demo/recommendationservice:v0.8.0
+        image: $RECOMMENDATION_IMAGE
         ports:
         - containerPort: 8080
         env:
@@ -238,28 +314,33 @@ spec:
           limits:
             cpu: 200m
             memory: 450Mi
+EOF
 ```
 
-Deploy:
+Verify deployment:
 ```bash
-kubectl apply -f microservices-app.yaml
+kubectl get pods --namespace $APP_NS  # `Check pods (should show 2/2 containers)`
 
-# Verify pods have sidecars (2/2)
-kubectl get pods -n observability-demo
+kubectl wait \
+  --for=condition=ready pod \
+  --all \
+  --namespace $APP_NS \
+  --timeout=300s                       # `Wait for all pods to be ready`
 
-# Wait for all pods to be ready
-kubectl wait --for=condition=ready pod --all -n observability-demo --timeout=300s
+echo "Application deployed with $APP_NS namespace"
 ```
 
-### 7. Create Istio Gateway for Application
-Create `gateway.yaml`:
+---
 
-```yaml
+## Step 7: Create Istio Gateway
+
+Deploy Gateway and VirtualService:
+```bash
+kubectl apply --namespace $APP_NS -f - <<EOF
 apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:
   name: frontend-gateway
-  namespace: observability-demo
 spec:
   selector:
     istio: ingressgateway
@@ -275,7 +356,6 @@ apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: frontend
-  namespace: observability-demo
 spec:
   hosts:
   - "*"
@@ -287,315 +367,164 @@ spec:
         host: frontend
         port:
           number: 8080
-```
+EOF
 
-Apply:
-```bash
-kubectl apply -f gateway.yaml
+kubectl wait \
+  --for=jsonpath='{.status.loadBalancer.ingress[0].ip}' \
+  svc/istio-ingressgateway \
+  --namespace $ISTIO_NS \
+  --timeout=300s                       # `Wait for external IP`
 
-# Get gateway URL
-export GATEWAY_URL=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+GATEWAY_URL=$(kubectl get svc istio-ingressgateway \
+  --namespace $ISTIO_NS \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')  # `Get ingress IP`
+
+echo "Gateway URL captured: $GATEWAY_URL"
 echo "Application URL: http://$GATEWAY_URL"
 ```
 
-### 8. Generate Traffic for Observability
+---
+
+## Step 8: Generate Traffic for Observability
+
+Generate continuous traffic:
 ```bash
-# Generate continuous traffic
-while true; do
-  curl -s http://$GATEWAY_URL > /dev/null
-  echo "Request sent at $(date)"
-  sleep 1
-done
+while true; do \
+  curl -s "http://$GATEWAY_URL" > /dev/null; \
+  sleep 1; \
+done &                                 # `Run in background`
+
+TRAFFIC_PID=$!                         # `Save process ID`
+echo "Traffic generator running (PID: $TRAFFIC_PID)"
 ```
 
-Run in background:
-```bash
-# Install hey for load generation
-go install github.com/rakyll/hey@latest
+---
 
-# Generate load
-hey -z 10m -c 5 -q 1 http://$GATEWAY_URL
+## Step 9: Access Kiali Dashboard
+
+Open Kiali using istioctl:
+```bash
+istioctl dashboard kiali --address 0.0.0.0  # `Open Kiali (http://localhost:20001)`
 ```
 
-### 9. Explore Kiali - Service Graph
-Open Kiali dashboard and explore:
+Alternatively, use port-forwarding:
+```bash
+kubectl port-forward \
+  --namespace $ISTIO_NS \
+  --address 0.0.0.0 \
+  svc/kiali 20001:20001 &              # `Port-forward to Kiali`
 
-**Graph View:**
-- Navigate to **Graph** → Select **observability-demo** namespace
-- View service topology
-- Change display to show:
-  - Traffic animation
-  - Request percentage
-  - Response time
-  - Security (mTLS status)
+echo "Kiali dashboard: http://localhost:20001"
+```
 
-**Graph Display Options:**
-- Versioned app graph
-- Workload graph
-- Service graph
-- Operation nodes
+---
 
-**Graph Settings:**
-- Enable "Traffic Animation"
-- Enable "Service Nodes"
-- Show "Response Time" edge labels
-- Show "Security" badges
+## Step 10: Explore Kiali Service Graph
 
-### 10. Kiali - Application Metrics
 In Kiali dashboard:
 
-**Applications View:**
-- Navigate to **Applications** → **observability-demo**
-- Select **frontend** application
-- View metrics:
-  - Request volume
-  - Request duration
-  - Request size
-  - Response size
-  - TCP traffic
+**1. Navigate to Graph View:**
+- Click **Graph** in left sidebar
+- Select namespace: `$APP_NS`
+- Choose display: **Versioned app graph**
 
-**Inbound/Outbound Metrics:**
-- Inbound metrics (requests to this service)
-- Outbound metrics (requests from this service)
+**2. Enable Visualizations:**
+- **Traffic Animation**: Shows real-time request flow
+- **Response Time**: Displays latency on edges
+- **Security**: Shows mTLS lock icons
+- **Service Nodes**: Displays service topology
 
-### 11. Kiali - Workload Analysis
-**Workloads View:**
-- Navigate to **Workloads** → **observability-demo**
-- Select **frontend** workload
-- View:
-  - Pod status
-  - Container logs
-  - Envoy logs
-  - Envoy config
+**3. Analyze Topology:**
+- Observe: frontend → productcatalog
+- Observe: frontend → recommendation → productcatalog
+- Check: All connections show mTLS (lock icons)
+- Monitor: Traffic percentages and response times
 
-**Pod Details:**
+---
+
+
+## Step 11: Access Jaeger Dashboard
+
+Open Jaeger using istioctl:
 ```bash
-# View pod logs directly from Kiali UI
-# Or via kubectl:
-POD=$(kubectl get pod -n observability-demo -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n observability-demo $POD -c frontend
-kubectl logs -n observability-demo $POD -c istio-proxy
+istioctl dashboard jaeger --address 0.0.0.0  # `Open Jaeger (http://localhost:16686)`
 ```
 
-### 12. Kiali - Service Health
-**Services View:**
-- Navigate to **Services** → **observability-demo**
-- View health indicators:
-  - Green: Healthy (error rate < 0.1%)
-  - Orange: Degraded (error rate 0.1-20%)
-  - Red: Failure (error rate > 20%)
+Alternatively, use port-forwarding:
+```bash
+kubectl port-forward \
+  --namespace $ISTIO_NS \
+  --address 0.0.0.0 \
+  svc/tracing 16686:80 &               # `Port-forward to Jaeger`
 
-**Service Metrics:**
-- Request rate
-- Error rate
-- Duration (P50, P95, P99)
-
-### 13. Configure Kiali Custom Dashboards
-Create custom dashboard configuration:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kiali
-  namespace: istio-system
-  labels:
-    app: kiali
-data:
-  config.yaml: |
-    server:
-      port: 20001
-      web_root: /kiali
-    external_services:
-      prometheus:
-        url: http://prometheus:9090
-      grafana:
-        enabled: true
-        in_cluster_url: http://grafana:3000
-        url: http://localhost:3000
-      tracing:
-        enabled: true
-        in_cluster_url: http://tracing:80
-        url: http://localhost:16686
-    istio_namespace: istio-system
+echo "Jaeger UI: http://localhost:16686"
 ```
 
-### 14. Jaeger - Distributed Tracing
-Open Jaeger UI and explore:
+---
 
-**Search Traces:**
-- Service: **frontend.observability-demo**
-- Operation: **all**
-- Lookback: **1h**
-- Click **Find Traces**
+## Step 12: Search and Analyze Traces
 
-**Trace Details:**
-- Click on a trace to see:
-  - Span timeline
-  - Service calls
-  - Duration breakdown
-  - Tags and logs
+In Jaeger UI:
 
-### 15. Analyze Trace Spans
-In Jaeger, examine trace details:
+**Search for Traces:**
+1. **Service**: Select `frontend.$APP_NS`
+2. **Operation**: Select `all` or specific operation
+3. **Lookback**: `1h` (last hour)
+4. Click **Find Traces**
+
+**Analyze Trace Details:**
+- Click on any trace to expand
+- **Span Timeline**: Visual representation of service calls
+- **Duration**: Total request duration
+- **Spans**: Individual service operations
+- **Tags**: HTTP method, status code, etc.
+
+---
+
+## Step 13: Examine Span Details
+
+In a trace view:
 
 **Span Information:**
-- Operation name
-- Start time and duration
-- Tags (HTTP method, status code, etc.)
-- Logs (events within span)
-- Process information
+- **Operation Name**: HTTP GET, gRPC call, etc.
+- **Duration**: Time taken for this operation
+- **Tags**: Request metadata (http.method, http.status_code, etc.)
+- **Logs**: Events within span
+- **Process**: Service and version info
 
-**Trace DAG:**
-- View trace as directed acyclic graph
-- See parallel vs sequential calls
-- Identify bottlenecks
+**Identify Bottlenecks:**
+- Look for spans with high duration
+- Check for sequential vs parallel calls
+- Analyze error spans (status tags)
 
-### 16. Compare Traces
-**Trace Comparison:**
-- Select multiple traces
-- Click **Compare**
-- Analyze differences in:
-  - Total duration
-  - Span count
-  - Service calls
-  - Error patterns
+---
 
-### 17. Configure Sampling Rate
-Adjust trace sampling:
+## Step 14: Compare Traces
 
-```yaml
+Select multiple traces for comparison:
+1. Check boxes next to 2-3 traces
+2. Click **Compare** button
+3. Analyze differences:
+   - Total duration variance
+   - Span count differences
+   - Service call patterns
+   - Error occurrences
+
+---
+
+## Step 15: Configure Trace Sampling
+
+Adjust Istio sampling rate:
+```bash
+kubectl apply --namespace $ISTIO_NS -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: istio
-  namespace: istio-system
 data:
   mesh: |
     defaultConfig:
       tracing:
-        sampling: 100.0  # 100% sampling for demo
+        sampling: $SAMPLING_RATE
         zipkin:
-          address: jaeger-collector.istio-system:9411
-```
-
-Apply:
-```bash
-kubectl apply -f istio-tracing-config.yaml
-
-# Restart workloads to pick up new config
-kubectl rollout restart deployment -n observability-demo
-```
-
-### 18. Custom Span Tags
-Add custom tags to traces in application code:
-
-```python
-# Python example with OpenTelemetry
-from opentelemetry import trace
-
-tracer = trace.get_tracer(__name__)
-
-with tracer.start_as_current_span("process_request") as span:
-    span.set_attribute("user.id", user_id)
-    span.set_attribute("order.total", order_total)
-    # Process request
-```
-
-### 19. Grafana - Istio Dashboards
-Access Grafana:
-
-```bash
-kubectl port-forward svc/grafana -n istio-system 3000:3000
-# Open http://localhost:3000
-```
-
-Import Istio dashboards:
-- **Istio Mesh Dashboard**: Overall mesh metrics
-- **Istio Service Dashboard**: Per-service metrics
-- **Istio Workload Dashboard**: Per-workload metrics
-- **Istio Performance Dashboard**: Control plane metrics
-
-### 20. Create Custom Kiali Namespace Labels
-Label namespaces for better organization:
-
-```bash
-# Add custom labels for Kiali filtering
-kubectl label namespace observability-demo env=production
-kubectl label namespace observability-demo team=platform
-
-# View in Kiali namespace selector
-```
-
-Create custom metric queries:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: kiali
-  namespace: istio-system
-data:
-  config.yaml: |
-    server:
-      metrics_enabled: true
-      metrics_port: 9090
-    kubernetes_config:
-      custom_labels:
-        namespaces:
-        - env
-        - team
-```
-
-## Expected Results
-- Kiali showing service mesh topology
-- Real-time traffic flow visualization
-- Service health indicators (green/orange/red)
-- Request metrics (rate, duration, size)
-- Jaeger displaying distributed traces
-- Trace spans showing service dependencies
-- End-to-end request latency breakdown
-- Grafana dashboards with Istio metrics
-- mTLS status visible in service graph
-
-## Key Takeaways
-- **Kiali** provides service mesh observability UI
-- **Service graph** visualizes mesh topology
-- **Traffic animation** shows real-time request flow
-- **Health indicators** quickly identify issues
-- **Jaeger** enables distributed tracing
-- **Traces** show end-to-end request path
-- **Spans** represent individual service calls
-- **Sampling** controls trace collection rate
-- **Grafana** complements with detailed metrics
-- Integration between Kiali, Jaeger, Prometheus, Grafana
-
-## Kiali Features
-
-| Feature | Purpose |
-|---------|---------|
-| Graph | Service topology visualization |
-| Applications | Application-level metrics |
-| Workloads | Deployment/pod details |
-| Services | Service health and metrics |
-| Istio Config | Validate mesh configuration |
-| Distributed Tracing | Integration with Jaeger |
-
-## Jaeger Components
-
-| Component | Purpose |
-|-----------|---------|
-| Agent | Collects spans from apps |
-| Collector | Receives and processes traces |
-| Query | Serves UI and API |
-| Storage | Stores trace data |
-
-## Troubleshooting
-- **No data in Kiali**: Check Prometheus connection
-- **Traces not appearing**: Verify sampling rate
-- **Graph empty**: Ensure traffic is flowing
-- **mTLS not showing**: Check PeerAuthentication
-- **Slow dashboard**: Reduce time range or sampling
-
----
-
+          address: jaeger-collector.$ISTIO_NS:9411
