@@ -1,37 +1,130 @@
-# Lab 3d: Expose with LoadBalancer
+# Lab 3d: Expose Workloads with LoadBalancer
 
 ## Objective
-Expose workloads using a public LoadBalancer.
+Expose Kubernetes workloads using **Azure Load Balancer** with public/static/internal IPs. Demonstrate traffic distribution, health probes, session affinity, IP restrictions, and Azure Load Balancer integration with AKS.
 
 ## Prerequisites
-- AKS cluster running
-- `kubectl` configured
-- Azure subscription with available public IP quota
+- Azure CLI installed and authenticated
+- `kubectl` installed
+- Sufficient Azure subscription quota for AKS and public IPs
 
-## Steps
+---
 
-### 1. Deploy Sample Application
-Create `web-app-deployment.yaml`:
+## 1. Set Lab Parameters
 
-```yaml
+```bash
+# Azure resource configuration
+RESOURCE_GROUP="rg-aks-lb-lab"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-lb-demo"
+
+# AKS cluster configuration
+NODE_COUNT=3
+NODE_VM_SIZE="Standard_DS2_v2"
+K8S_VERSION="1.28"
+NETWORK_PLUGIN="azure"      # Azure CNI for internal LB support
+
+# Application configuration
+APP_NAME="web-app"
+APP_REPLICAS=3
+NAMESPACE="default"
+
+# Static IP configuration
+PUBLIC_IP_NAME="aks-static-ip"
+
+# Display all configuration
+echo "=== Lab Configuration ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Kubernetes Version: $K8S_VERSION"
+echo "App Name: $APP_NAME"
+echo "App Replicas: $APP_REPLICAS"
+echo "Static IP Name: $PUBLIC_IP_NAME"
+echo "========================="
+```
+
+---
+
+## 2. Create Resource Group and AKS Cluster
+
+```bash
+# Create resource group
+RG_RESULT=$(az group create \
+  --name $RESOURCE_GROUP `# Resource group name` \
+  --location $LOCATION `# Azure region` \
+  --query 'properties.provisioningState' \
+  --output tsv)
+
+echo "Resource Group: $RG_RESULT"
+
+# Create AKS cluster with Standard Load Balancer (7-12 minutes)
+CLUSTER_RESULT=$(az aks create \
+  --resource-group $RESOURCE_GROUP `# Target resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --location $LOCATION `# Azure region` \
+  --node-count $NODE_COUNT `# Initial node count` \
+  --node-vm-size $NODE_VM_SIZE `# Node VM size` \
+  --kubernetes-version $K8S_VERSION `# K8s version` \
+  --network-plugin $NETWORK_PLUGIN `# Azure CNI (required for internal LB)` \
+  --load-balancer-sku standard `# Standard Load Balancer (required)` \
+  --enable-managed-identity `# Use system-assigned managed identity` \
+  --generate-ssh-keys `# Auto-generate SSH keys` \
+  --query 'provisioningState' \
+  --output tsv)
+
+echo "AKS Cluster: $CLUSTER_RESULT"
+
+# Get AKS credentials
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP `# Source resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --overwrite-existing `# Replace existing kubeconfig entry` \
+  --output none
+
+# Verify cluster connectivity
+echo "Current kubectl context: $(kubectl config current-context)"
+kubectl get nodes
+
+# Get node resource group (where Azure creates LB resources)
+NODE_RG=$(az aks show \
+  --resource-group $RESOURCE_GROUP `# Source resource group` \
+  --name $CLUSTER_NAME `# AKS cluster name` \
+  --query "nodeResourceGroup" `# Auto-generated resource group` \
+  --output tsv)
+
+echo "Node Resource Group: $NODE_RG"
+```
+
+---
+
+## 3. Deploy Sample Application
+
+```bash
+# Create deployment with pod hostname display
+cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: web-app
-  namespace: default
+  name: $APP_NAME
+  namespace: $NAMESPACE
 spec:
-  replicas: 3
+  replicas: $APP_REPLICAS
   selector:
     matchLabels:
-      app: web-app
+      app: $APP_NAME
   template:
     metadata:
       labels:
-        app: web-app
+        app: $APP_NAME
     spec:
       containers:
       - name: nginx
         image: nginx:alpine
+        command: ["/bin/sh"]
+        args:
+        - "-c"
+        - "echo 'Pod: '\$(hostname) > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'"
         ports:
         - containerPort: 80
         resources:
@@ -41,333 +134,336 @@ spec:
           limits:
             cpu: 200m
             memory: 256Mi
+EOF
+
+# Wait for deployment to be ready
+kubectl rollout status deployment/$APP_NAME \
+  -n $NAMESPACE \
+  --timeout=120s
+
+# Verify pods are running
+kubectl get pods -n $NAMESPACE -l app=$APP_NAME
 ```
 
-Apply:
-```bash
-kubectl apply -f web-app-deployment.yaml
-kubectl get pods -l app=web-app
-```
+---
 
-### 2. Create LoadBalancer Service
-Create `loadbalancer-service.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: web-app-lb
-  namespace: default
-spec:
-  type: LoadBalancer
-  selector:
-    app: web-app
-  ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 80
-```
-
-Apply and watch:
-```bash
-kubectl apply -f loadbalancer-service.yaml
-kubectl get service web-app-lb --watch
-```
-
-**Wait for EXTERNAL-IP** (takes 1-3 minutes).
-
-### 3. Verify LoadBalancer Creation
-```bash
-# Get external IP
-EXTERNAL_IP=$(kubectl get service web-app-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "External IP: $EXTERNAL_IP"
-
-# Test access
-curl http://$EXTERNAL_IP
-```
-
-Check Azure Load Balancer:
-```bash
-# Get cluster resource group
-CLUSTER_RG=$(az aks show \
-  --resource-group <resource-group> \
-  --name <cluster-name> \
-  --query "nodeResourceGroup" -o tsv)
-
-# List load balancers
-az network lb list \
-  --resource-group $CLUSTER_RG \
-  -o table
-
-# View backend pools
-az network lb address-pool list \
-  --resource-group $CLUSTER_RG \
-  --lb-name kubernetes \
-  -o table
-```
-
-### 4. Create LoadBalancer with Static Public IP
-Create a static public IP:
+## 4. Create LoadBalancer Service (Dynamic Public IP)
 
 ```bash
-# Create public IP in cluster resource group
-PUBLIC_IP_NAME="aks-static-ip"
-
-az network public-ip create \
-  --resource-group $CLUSTER_RG \
-  --name $PUBLIC_IP_NAME \
-  --sku Standard \
-  --allocation-method Static
-
-# Get the IP address
-STATIC_IP=$(az network public-ip show \
-  --resource-group $CLUSTER_RG \
-  --name $PUBLIC_IP_NAME \
-  --query ipAddress -o tsv)
-
-echo "Static IP: $STATIC_IP"
-```
-
-Create service with static IP - `static-lb-service.yaml`:
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: web-app-static-lb
-  namespace: default
-  annotations:
-    service.beta.kubernetes.io/azure-load-balancer-resource-group: "<CLUSTER_RG>"
-spec:
-  type: LoadBalancer
-  loadBalancerIP: "<STATIC_IP>"
-  selector:
-    app: web-app
-  ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 80
-```
-
-Apply with substitution:
-```bash
+# Create LoadBalancer service (Azure auto-assigns public IP)
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-static-lb
-  namespace: default
-  annotations:
-    service.beta.kubernetes.io/azure-load-balancer-resource-group: "$CLUSTER_RG"
+  name: ${APP_NAME}-lb
+  namespace: $NAMESPACE
 spec:
   type: LoadBalancer
-  loadBalancerIP: "$STATIC_IP"
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - protocol: TCP
     port: 80
     targetPort: 80
 EOF
+
+# Watch for external IP assignment (takes 1-3 minutes)
+kubectl get service ${APP_NAME}-lb -n $NAMESPACE --watch
 ```
 
-Verify:
+**Press Ctrl+C once EXTERNAL-IP appears.**
+
+### Verify LoadBalancer and Test Access
+
 ```bash
-kubectl get service web-app-static-lb
+# Get external IP
+EXTERNAL_IP=$(kubectl get service ${APP_NAME}-lb \
+  -n $NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "External IP: $EXTERNAL_IP"
+
+# Test access (should show pod hostname)
+curl http://$EXTERNAL_IP
+
+# Test load distribution across pods
+for i in {1..10}; do
+  curl -s http://$EXTERNAL_IP
+done
+```
+
+---
+
+## 5. Verify Azure Load Balancer Integration
+
+```bash
+# List load balancers in node resource group
+az network lb list \
+  --resource-group $NODE_RG `# Auto-generated resource group` \
+  --output table
+
+# View backend address pool (contains node IPs)
+az network lb address-pool list \
+  --resource-group $NODE_RG `# Node resource group` \
+  --lb-name kubernetes `# Default LB name in AKS` \
+  --output table
+
+# View load balancing rules
+az network lb rule list \
+  --resource-group $NODE_RG `# Node resource group` \
+  --lb-name kubernetes `# Load balancer name` \
+  --output table
+
+# View health probes
+az network lb probe list \
+  --resource-group $NODE_RG `# Node resource group` \
+  --lb-name kubernetes `# Load balancer name` \
+  --output table
+```
+
+---
+
+## 6. Create LoadBalancer with Static Public IP
+
+```bash
+# Create static public IP in node resource group (REQUIRED location)
+STATIC_IP_RESULT=$(az network public-ip create \
+  --resource-group $NODE_RG `# Must be in node resource group` \
+  --name $PUBLIC_IP_NAME `# Public IP name` \
+  --sku Standard `# Standard SKU required for AKS` \
+  --allocation-method Static `# Static allocation` \
+  --query 'publicIp.ipAddress' \
+  --output tsv)
+
+echo "Static IP: $STATIC_IP_RESULT"
+
+# Store static IP for reuse
+STATIC_IP=$STATIC_IP_RESULT
+
+# Create LoadBalancer service with static IP
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}-static-lb
+  namespace: $NAMESPACE
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: "$NODE_RG"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: "$STATIC_IP"
+  selector:
+    app: $APP_NAME
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+EOF
+
+# Wait for service to be ready
+kubectl get service ${APP_NAME}-static-lb -n $NAMESPACE --watch
+```
+
+**Press Ctrl+C once EXTERNAL-IP matches the static IP.**
+
+### Verify Static IP Assignment
+
+```bash
+# Verify service uses the static IP
+ASSIGNED_IP=$(kubectl get service ${APP_NAME}-static-lb \
+  -n $NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "Assigned IP: $ASSIGNED_IP"
+echo "Static IP: $STATIC_IP"
+
+# Test access
 curl http://$STATIC_IP
 ```
 
-### 5. Create Internal LoadBalancer
-Create `internal-lb-service.yaml`:
+---
 
-```yaml
+## 7. Create Internal LoadBalancer
+
+```bash
+# Create internal LoadBalancer (private IP from VNet)
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-internal-lb
-  namespace: default
+  name: ${APP_NAME}-internal-lb
+  namespace: $NAMESPACE
   annotations:
     service.beta.kubernetes.io/azure-load-balancer-internal: "true"
 spec:
   type: LoadBalancer
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - protocol: TCP
     port: 80
     targetPort: 80
+EOF
+
+# Wait for internal IP assignment
+kubectl get service ${APP_NAME}-internal-lb -n $NAMESPACE --watch
 ```
 
-Apply:
-```bash
-kubectl apply -f internal-lb-service.yaml
-kubectl get service web-app-internal-lb
-```
+**Press Ctrl+C once EXTERNAL-IP shows a private IP.**
 
-Get internal IP:
+### Test Internal LoadBalancer
+
 ```bash
-INTERNAL_IP=$(kubectl get service web-app-internal-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+# Get internal IP
+INTERNAL_IP=$(kubectl get service ${APP_NAME}-internal-lb \
+  -n $NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
 echo "Internal IP: $INTERNAL_IP"
 
-# Test from within cluster
-kubectl run test-pod --image=busybox --rm -it -- wget -O- http://$INTERNAL_IP
+# Test from within cluster using temporary pod
+kubectl run test-internal \
+  --image=busybox `# Lightweight test image` \
+  --rm `# Delete after exit` \
+  -it `# Interactive terminal` \
+  -- wget -qO- http://$INTERNAL_IP
 ```
 
-### 6. Create LoadBalancer with Custom Subnet
-```yaml
+---
+
+## 8. Configure Session Affinity (Sticky Sessions)
+
+```bash
+# Create LoadBalancer with client IP affinity
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-custom-subnet-lb
-  namespace: default
-  annotations:
-    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
-    service.beta.kubernetes.io/azure-load-balancer-internal-subnet: "backend-subnet"
-spec:
-  type: LoadBalancer
-  selector:
-    app: web-app
-  ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 80
-```
-
-### 7. Configure Session Affinity
-Create `session-affinity-lb.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: web-app-sticky-lb
-  namespace: default
+  name: ${APP_NAME}-sticky-lb
+  namespace: $NAMESPACE
 spec:
   type: LoadBalancer
   sessionAffinity: ClientIP
   sessionAffinityConfig:
     clientIP:
-      timeoutSeconds: 3600
+      timeoutSeconds: 3600  # 1 hour sticky session
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - protocol: TCP
     port: 80
     targetPort: 80
+EOF
+
+# Wait for external IP
+kubectl get service ${APP_NAME}-sticky-lb -n $NAMESPACE --watch
 ```
 
-Apply and test:
-```bash
-kubectl apply -f session-affinity-lb.yaml
-STICKY_IP=$(kubectl get service web-app-sticky-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+**Press Ctrl+C once EXTERNAL-IP appears.**
 
-# Make multiple requests - should hit same pod
+### Test Session Affinity
+
+```bash
+# Get sticky LB IP
+STICKY_IP=$(kubectl get service ${APP_NAME}-sticky-lb \
+  -n $NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "Sticky LB IP: $STICKY_IP"
+
+# Make multiple requests - should hit same pod consistently
 for i in {1..10}; do
-  curl http://$STICKY_IP
+  curl -s http://$STICKY_IP
   sleep 1
 done
 ```
 
-### 8. Configure Health Probe
-Create `health-probe-lb.yaml`:
+**Expected:** All requests route to the same pod due to ClientIP affinity.
 
-```yaml
+---
+
+## 9. Configure Custom Health Probe
+
+```bash
+# Create LoadBalancer with custom health probe configuration
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-health-lb
-  namespace: default
+  name: ${APP_NAME}-health-lb
+  namespace: $NAMESPACE
   annotations:
-    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: "/health"
-    service.beta.kubernetes.io/azure-load-balancer-health-probe-protocol: "http"
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: "/"
     service.beta.kubernetes.io/azure-load-balancer-health-probe-interval: "5"
     service.beta.kubernetes.io/azure-load-balancer-health-probe-num-of-probe: "2"
 spec:
   type: LoadBalancer
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - protocol: TCP
     port: 80
     targetPort: 80
+EOF
+
+# View service with health probe annotations
+kubectl describe service ${APP_NAME}-health-lb -n $NAMESPACE | grep -A 5 "Annotations"
 ```
 
-Update deployment with health endpoint:
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: web-app-with-health
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: web-app-health
-  template:
-    metadata:
-      labels:
-        app: web-app-health
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:alpine
-        ports:
-        - containerPort: 80
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 10
-          periodSeconds: 5
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 5
-          periodSeconds: 3
-```
+---
 
-### 9. Restrict Source IP Ranges
-Create `restricted-lb-service.yaml`:
+## 10. Restrict Source IP Ranges
 
-```yaml
+```bash
+# Get your current public IP for testing
+MY_IP=$(curl -s https://api.ipify.org)
+echo "Your current IP: $MY_IP"
+
+# Create LoadBalancer with IP restrictions
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-restricted-lb
-  namespace: default
+  name: ${APP_NAME}-restricted-lb
+  namespace: $NAMESPACE
 spec:
   type: LoadBalancer
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - protocol: TCP
     port: 80
     targetPort: 80
   loadBalancerSourceRanges:
-  - "203.0.113.0/24"      # Replace with your allowed IP range
-  - "198.51.100.0/24"     # Multiple ranges supported
+  - "$MY_IP/32"           # Only allow your current IP
+  - "203.0.113.0/24"      # Example additional range
+EOF
+
+# Test access (should work from your IP)
+RESTRICTED_IP=$(kubectl get service ${APP_NAME}-restricted-lb \
+  -n $NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "Restricted LB IP: $RESTRICTED_IP"
+curl http://$RESTRICTED_IP
 ```
 
-Apply:
+---
+
+## 11. Multi-Port LoadBalancer
+
 ```bash
-kubectl apply -f restricted-lb-service.yaml
-```
-
-Test from allowed and blocked IPs.
-
-### 10. Multi-Port LoadBalancer
-Create `multi-port-lb.yaml`:
-
-```yaml
+# Create LoadBalancer exposing multiple ports
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-multiport-lb
-  namespace: default
+  name: ${APP_NAME}-multiport-lb
+  namespace: $NAMESPACE
 spec:
   type: LoadBalancer
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - name: http
     protocol: TCP
@@ -376,135 +472,273 @@ spec:
   - name: https
     protocol: TCP
     port: 443
-    targetPort: 443
+    targetPort: 80  # Redirect to port 80 for demo
+EOF
+
+# View service with multiple ports
+kubectl get service ${APP_NAME}-multiport-lb -n $NAMESPACE
+kubectl describe service ${APP_NAME}-multiport-lb -n $NAMESPACE | grep -A 3 "Port:"
 ```
 
-### 11. View LoadBalancer Details
+---
+
+## 12. View LoadBalancer Details and Diagnostics
+
 ```bash
-# View service details
-kubectl describe service web-app-lb
+# View detailed service information
+kubectl describe service ${APP_NAME}-lb -n $NAMESPACE
 
 # Get all LoadBalancer services
 kubectl get services --all-namespaces -o wide | grep LoadBalancer
 
-# View endpoints
-kubectl get endpoints web-app-lb
+# View endpoints (backend pods)
+kubectl get endpoints ${APP_NAME}-lb -n $NAMESPACE
 
-# Check events
-kubectl get events --field-selector involvedObject.name=web-app-lb
+# Check service events
+kubectl get events \
+  --field-selector involvedObject.name=${APP_NAME}-lb \
+  -n $NAMESPACE
+
+# View service in YAML format
+kubectl get service ${APP_NAME}-lb -n $NAMESPACE -o yaml
 ```
 
-### 12. Monitor LoadBalancer Metrics in Azure
+---
+
+## 13. Monitor LoadBalancer Metrics in Azure
+
 ```bash
-# Get public IP resource ID
+# Get public IP resource ID for the static IP
 PUBLIC_IP_ID=$(az network public-ip show \
-  --resource-group $CLUSTER_RG \
-  --name $PUBLIC_IP_NAME \
-  --query id -o tsv)
+  --resource-group $NODE_RG `# Node resource group` \
+  --name $PUBLIC_IP_NAME `# Static IP name` \
+  --query id `# Resource ID for monitoring` \
+  --output tsv)
 
-# View metrics (requires Azure CLI with monitor extension)
+echo "Public IP Resource ID: $PUBLIC_IP_ID"
+
+# List available metrics for the public IP
+az monitor metrics list-definitions \
+  --resource $PUBLIC_IP_ID `# Target resource` \
+  --output table
+
+# View byte count metrics (last hour)
 az monitor metrics list \
-  --resource $PUBLIC_IP_ID \
-  --metric "ByteCount" \
-  --start-time $(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ') \
-  --interval PT1M \
-  -o table
+  --resource $PUBLIC_IP_ID `# Target resource` \
+  --metric "ByteCount" `# Data transferred metric` \
+  --interval PT1M `# 1-minute intervals` \
+  --output table
 ```
 
-### 13. Configure Idle Timeout
-```yaml
+---
+
+## 14. Configure Idle Timeout
+
+```bash
+# Create LoadBalancer with custom TCP idle timeout
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: web-app-timeout-lb
-  namespace: default
+  name: ${APP_NAME}-timeout-lb
+  namespace: $NAMESPACE
   annotations:
     service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout: "30"
 spec:
   type: LoadBalancer
   selector:
-    app: web-app
+    app: $APP_NAME
   ports:
   - protocol: TCP
     port: 80
     targetPort: 80
+EOF
+
+# Verify annotation
+kubectl describe service ${APP_NAME}-timeout-lb -n $NAMESPACE | grep -i timeout
 ```
 
-### 14. Test Load Distribution
+---
+
+## 15. Test Load Distribution
+
 ```bash
 # Get LoadBalancer IP
-LB_IP=$(kubectl get service web-app-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+LB_IP=$(kubectl get service ${APP_NAME}-lb \
+  -n $NAMESPACE \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
-# Make 100 requests and count pod distribution
-for i in {1..100}; do
-  curl -s http://$LB_IP | grep -o "pod/[^<]*" || echo "unknown"
+echo "Testing load distribution across $APP_REPLICAS pods..."
+
+# Make 50 requests and count pod distribution
+for i in {1..50}; do
+  curl -s http://$LB_IP
 done | sort | uniq -c
+
+echo "Load distribution complete"
 ```
 
-### 15. Cleanup and Cost Management
+**Expected:** Requests distributed across all 3 replicas.
+
+---
+
+## Expected Results
+
+✅ LoadBalancer service automatically provisions Azure Load Balancer  
+✅ External IP assigned and accessible from internet  
+✅ Traffic distributed evenly across backend pods  
+✅ Static IPs remain consistent across service recreations  
+✅ Internal LoadBalancers accessible only within VNet  
+✅ Session affinity routes clients to same pod consistently  
+✅ Source IP restrictions enforced at load balancer level  
+✅ Health probes monitor backend pod availability  
+✅ Multiple ports supported on single LoadBalancer  
+
+---
+
+## Cleanup
+
+### Option 1: Delete Kubernetes Resources Only
 ```bash
-# Delete services (releases public IPs)
-kubectl delete service web-app-lb web-app-static-lb web-app-internal-lb
+# Delete all LoadBalancer services (releases public IPs)
+kubectl delete service ${APP_NAME}-lb ${APP_NAME}-static-lb \
+  ${APP_NAME}-internal-lb ${APP_NAME}-sticky-lb \
+  ${APP_NAME}-health-lb ${APP_NAME}-restricted-lb \
+  ${APP_NAME}-multiport-lb ${APP_NAME}-timeout-lb \
+  -n $NAMESPACE
+
+# Delete deployment
+kubectl delete deployment $APP_NAME -n $NAMESPACE
 
 # Delete static public IP
 az network public-ip delete \
-  --resource-group $CLUSTER_RG \
-  --name $PUBLIC_IP_NAME
-
-# Delete deployment
-kubectl delete deployment web-app
+  --resource-group $NODE_RG `# Node resource group` \
+  --name $PUBLIC_IP_NAME `# Static IP name`
 ```
 
-## Expected Results
-- LoadBalancer service automatically provisions Azure Load Balancer
-- External IP assigned and accessible from internet
-- Traffic distributed across backend pods
-- Static IPs remain consistent across service recreations
-- Internal LoadBalancers accessible only within VNet
-- Health probes monitor backend pod health
-- Source IP restrictions enforced at load balancer level
-
-## Cleanup
+### Option 2: Delete Entire Resource Group (Complete Cleanup)
 ```bash
-kubectl delete service --all
-kubectl delete deployment web-app web-app-with-health
+# Delete entire resource group (removes cluster, LB, and all resources)
+az group delete \
+  --name $RESOURCE_GROUP `# Target resource group` \
+  --yes `# Skip confirmation` \
+  --no-wait `# Run asynchronously`
 ```
+
+---
 
 ## Key Takeaways
-- **LoadBalancer** service type creates Azure Load Balancer automatically
-- **Dynamic IPs** change if service is deleted/recreated
-- **Static IPs** must be in cluster's node resource group
-- **Internal LoadBalancers** use annotation `azure-load-balancer-internal: "true"`
-- **Health probes** can be customized via annotations
-- **Session affinity** enables sticky sessions
-- **Source ranges** restrict access to specific IPs
-- Each LoadBalancer service incurs Azure Load Balancer costs
-- Standard SKU supports availability zones
 
-## LoadBalancer vs Ingress
+- **LoadBalancer** service type automatically provisions Azure Standard Load Balancer
+- **Dynamic IPs** change if service is deleted/recreated; use static IPs for persistence
+- **Static IPs** must be created in the **node resource group** (not the cluster RG)
+- **Internal LoadBalancers** use annotation `service.beta.kubernetes.io/azure-load-balancer-internal: "true"`
+- **Azure CNI** is required for internal LoadBalancers with custom subnets
+- **Health probes** are automatically configured; customizable via annotations
+- **Session affinity** (ClientIP) enables sticky sessions for stateful applications
+- **loadBalancerSourceRanges** restricts access to specific IP ranges
+- Each LoadBalancer service incurs **Azure Load Balancer costs** (pay per service)
+- **Standard Load Balancer SKU** is required for AKS (Basic is deprecated)
+- LoadBalancers support **availability zones** for high availability
+
+---
+
+## How This Connects to Application Exposure
+
+This lab demonstrates **Layer 4 (TCP/UDP) load balancing** in Azure:
+
+### LoadBalancer Service Flow:
+
+```
+┌─────────────────────────────────────────┐
+│  Internet / VNet                        │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│  Azure Standard Load Balancer           │
+│  (Auto-provisioned by AKS)              │
+│                                         │
+│  ┌──────────────────────────────────┐  │
+│  │ Frontend IP (Public/Internal)    │  │
+│  ├──────────────────────────────────┤  │
+│  │ Load Balancing Rules             │  │
+│  ├──────────────────────────────────┤  │
+│  │ Health Probes                    │  │
+│  ├──────────────────────────────────┤  │
+│  │ Backend Pool (Node IPs)          │  │
+│  └──────────────────────────────────┘  │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│  AKS Nodes (kube-proxy)                 │
+│                                         │
+│  Pod1 ──── Pod2 ──── Pod3              │
+└─────────────────────────────────────────┘
+```
+
+### LoadBalancer vs Ingress:
 
 | Feature | LoadBalancer | Ingress |
 |---------|--------------|---------|
-| Layer | L4 (TCP/UDP) | L7 (HTTP/HTTPS) |
-| Cost | Per service | Shared |
-| IP addresses | One per service | One for multiple services |
-| SSL/TLS termination | No | Yes |
-| Path-based routing | No | Yes |
-| Use case | TCP/UDP apps | Web applications |
+| **OSI Layer** | Layer 4 (TCP/UDP) | Layer 7 (HTTP/HTTPS) |
+| **Cost** | Per service ($$) | Shared across services ($) |
+| **IP Addresses** | One per service | One for multiple services |
+| **SSL/TLS Termination** | No | Yes |
+| **Path-Based Routing** | No | Yes (URL routing) |
+| **Host-Based Routing** | No | Yes (domain routing) |
+| **Use Case** | Non-HTTP protocols, simple HTTP | Web apps, microservices |
+| **Azure Resource** | Azure Load Balancer | Application Gateway / AGIC |
+
+---
 
 ## Azure LoadBalancer Annotations
 
-| Annotation | Purpose |
-|------------|---------|
-| `azure-load-balancer-internal` | Create internal LB |
-| `azure-load-balancer-resource-group` | Specify RG for static IP |
-| `azure-load-balancer-health-probe-request-path` | Custom health check path |
-| `azure-load-balancer-tcp-idle-timeout` | Connection timeout (4-30 min) |
+| Annotation | Purpose | Example |
+|------------|---------|---------|
+| `service.beta.kubernetes.io/azure-load-balancer-internal` | Create internal LB | `"true"` |
+| `service.beta.kubernetes.io/azure-load-balancer-resource-group` | Specify RG for static IP | `"MC_myRG_myCluster_eastus"` |
+| `service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path` | Custom health check path | `"/health"` |
+| `service.beta.kubernetes.io/azure-load-balancer-health-probe-interval` | Probe interval (seconds) | `"5"` |
+| `service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout` | Connection timeout (minutes) | `"30"` (range: 4-30) |
+| `service.beta.kubernetes.io/azure-load-balancer-internal-subnet` | Custom subnet for internal LB | `"backend-subnet"` |
+
+---
+
+## LoadBalancer Best Practices
+
+| Practice | Implementation | Rationale |
+|----------|---------------|-----------|
+| **Use static IPs for production** | Create public IP in node RG | Prevent IP changes on service updates |
+| **Internal LB for backend services** | Use `azure-load-balancer-internal: "true"` | Reduce attack surface |
+| **Session affinity for stateful apps** | Set `sessionAffinity: ClientIP` | Maintain user session consistency |
+| **IP restrictions for security** | Configure `loadBalancerSourceRanges` | Limit access to known networks |
+| **Health probe customization** | Set probe path and interval | Improve failover detection |
+| **Monitor LB metrics** | Use Azure Monitor | Track traffic and performance |
+| **Limit LoadBalancer services** | Prefer Ingress for HTTP workloads | Reduce costs and IP consumption |
+
+---
 
 ## Troubleshooting
-- **EXTERNAL-IP stuck on \<pending\>**: Check Azure quota for public IPs
-- **Static IP not working**: Verify IP is in node resource group
-- **Health probe failing**: Check pod readiness and health endpoint
-- **Cannot access LoadBalancer**: Check NSG rules and source IP restrictions
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| **EXTERNAL-IP stuck on \<pending\>** | Azure quota exceeded or LB provisioning failure | Check public IP quota: `az network public-ip list` |
+| **Static IP not working** | IP not in node resource group | Verify IP location matches node RG |
+| **Health probe failing** | Pod not ready or health endpoint misconfigured | Check `kubectl describe pod` and readiness probes |
+| **Cannot access LoadBalancer** | NSG rules blocking traffic | Review NSG rules in node resource group |
+| **Source IP restriction not working** | Incorrect CIDR notation | Verify `loadBalancerSourceRanges` format |
+| **Session affinity not sticky** | Cache/cookies interfering | Test with curl (no cookies) |
+| **High latency** | LoadBalancer timeout too short | Increase `tcp-idle-timeout` annotation |
+
+---
+
+## Additional Resources
+
+- [AKS Load Balancer](https://learn.microsoft.com/azure/aks/load-balancer-standard)
+- [Azure Standard Load Balancer](https://learn.microsoft.com/azure/load-balancer/load-balancer-overview)
+- [Kubernetes Services](https://kubernetes.io/docs/concepts/services-networking/service/)
+- [AKS Network Concepts](https://learn.microsoft.com/azure/aks/concepts-network)
 
 ---
