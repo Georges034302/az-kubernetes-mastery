@@ -1,4 +1,5 @@
 # Lab 6c: MLflow on AKS with Databricks
+<img width="1162" height="828" alt="ZIMAGE" src="https://github.com/user-attachments/assets/6bbea4ac-e47d-4369-bc4f-9c9be36d9b28" />
 
 ## Objective
 Deploy MLflow tracking server on AKS and integrate with Databricks for end-to-end ML lifecycle management. Master experiment tracking, model registry, versioning, and production deployment of ML models on Kubernetes with A/B testing capabilities.
