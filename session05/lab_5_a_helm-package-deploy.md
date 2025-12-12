@@ -1,7 +1,7 @@
 # Lab 5a: Helm Package and Deploy
 
 ## Objective
-Create, package, and deploy a custom Helm chart to AKS with a containerized application using Azure Container Registry (ACR).
+Learn to create, package, and deploy a custom Helm chart to AKS with a containerized application using Azure Container Registry (ACR).
 
 ## Prerequisites
 - Azure CLI installed and authenticated
