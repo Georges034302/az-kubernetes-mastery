@@ -108,7 +108,7 @@ Get credentials:
 az aks get-credentials \
   --resource-group $RESOURCE_GROUP \
   --name $CLUSTER_NAME \
-  --overwrite-existing
+  --overwrite-existing  # `Merge credentials to kubeconfig`
 ```
 
 ---
@@ -117,13 +117,10 @@ az aks get-credentials \
 
 ```bash
 if ! command -v helm &> /dev/null; then
-  echo "Installing Helm..."
   curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-else
-  echo "Helm already installed"
 fi
 
-helm version --short
+helm version --short  # `Verify Helm installation`
 ```
 
 ---
@@ -201,8 +198,6 @@ docker build \
 Push image to ACR:
 ```bash
 docker push $ACR_LOGIN_SERVER/$APP_NAME:$IMAGE_TAG  # `Push to ACR`
-
-echo "Image pushed: $ACR_LOGIN_SERVER/$APP_NAME:$IMAGE_TAG"
 ```
 
 ---
@@ -306,19 +301,17 @@ helm lint $CHART_NAME  # `Check chart for issues`
 Render templates locally:
 ```bash
 helm template $RELEASE_NAME $CHART_NAME \
-  --namespace $APP_NAMESPACE \
-  > rendered-manifests.yaml
-
-echo "Rendered manifests saved to: rendered-manifests.yaml"
+  --namespace $APP_NAMESPACE \  # `Target namespace`
+  > rendered-manifests.yaml     # `Save output to file`
 ```
 
 Dry-run installation:
 ```bash
 helm install $RELEASE_NAME $CHART_NAME \
-  --namespace $APP_NAMESPACE \
-  --create-namespace \
-  --dry-run \
-  --debug
+  --namespace $APP_NAMESPACE \  # `Target namespace`
+  --create-namespace \           # `Create namespace if missing`
+  --dry-run \                    # `Simulate installation`
+  --debug                        # `Show debug output`
 ```
 
 ---
@@ -337,12 +330,12 @@ helm install $RELEASE_NAME $CHART_NAME \
 Check release status:
 ```bash
 helm status $RELEASE_NAME \
-  --namespace $APP_NAMESPACE
+  --namespace $APP_NAMESPACE  # `Show release details`
 ```
 
 List releases:
 ```bash
-helm list --namespace $APP_NAMESPACE
+helm list --namespace $APP_NAMESPACE  # `List all releases in namespace`
 ```
 
 ---
@@ -351,24 +344,24 @@ helm list --namespace $APP_NAMESPACE
 
 Check pods:
 ```bash
-kubectl get pods --namespace $APP_NAMESPACE
+kubectl get pods --namespace $APP_NAMESPACE  # `List pods in namespace`
 ```
 
 Check service:
 ```bash
-kubectl get service --namespace $APP_NAMESPACE
+kubectl get service --namespace $APP_NAMESPACE  # `Show service details`
 ```
 
 Test application:
 ```bash
 kubectl port-forward \
-  --namespace $APP_NAMESPACE \
-  svc/$RELEASE_NAME-$CHART_NAME 8080:80
+  --namespace $APP_NAMESPACE \              # `Target namespace`
+  svc/$RELEASE_NAME-$CHART_NAME 8080:80     # `Forward local 8080 to service port 80`
 ```
 
 Open browser to `http://localhost:8080` or:
 ```bash
-curl http://localhost:8080
+curl http://localhost:8080  # `Test application endpoint`
 ```
 
 ---
@@ -385,7 +378,7 @@ helm upgrade $RELEASE_NAME $CHART_NAME \
 
 View release history:
 ```bash
-helm history $RELEASE_NAME --namespace $APP_NAMESPACE
+helm history $RELEASE_NAME --namespace $APP_NAMESPACE  # `Show all revisions`
 ```
 
 ---
@@ -401,8 +394,8 @@ helm rollback $RELEASE_NAME \
 
 Rollback to specific revision:
 ```bash
-helm rollback $RELEASE_NAME 1 \
-  --namespace $APP_NAMESPACE
+helm rollback $RELEASE_NAME 1 \       # `Revision number to rollback to`
+  --namespace $APP_NAMESPACE           # `Target namespace`
 ```
 
 ---
@@ -413,8 +406,7 @@ Package the chart:
 ```bash
 helm package $CHART_NAME  # `Create .tgz archive`
 
-echo "Packaged chart:"
-ls -lh $CHART_NAME-$CHART_VERSION.tgz
+ls -lh $CHART_NAME-$CHART_VERSION.tgz  # `Show packaged file`
 ```
 
 ---
@@ -423,13 +415,11 @@ ls -lh $CHART_NAME-$CHART_VERSION.tgz
 
 Create local Helm repository:
 ```bash
-mkdir -p helm-repo
-mv $CHART_NAME-$CHART_VERSION.tgz helm-repo/
+mkdir -p helm-repo  # `Create repository directory`
+mv $CHART_NAME-$CHART_VERSION.tgz helm-repo/  # `Move chart to repo`
 
 helm repo index helm-repo/ \
   --url https://example.com/charts  # `Generate index.yaml`
-
-echo "Helm repository created at: helm-repo/"
 ```
 
 ---
@@ -457,12 +447,12 @@ After completing this lab, you should have:
 
 Uninstall Helm release:
 ```bash
-helm uninstall $RELEASE_NAME --namespace $APP_NAMESPACE
+helm uninstall $RELEASE_NAME --namespace $APP_NAMESPACE  # `Remove release`
 ```
 
 Delete namespace:
 ```bash
-kubectl delete namespace $APP_NAMESPACE
+kubectl delete namespace $APP_NAMESPACE  # `Delete namespace and resources`
 ```
 
 ### Option 2: Delete All Azure Resources
@@ -470,15 +460,15 @@ kubectl delete namespace $APP_NAMESPACE
 Delete resource group:
 ```bash
 az group delete \
-  --name $RESOURCE_GROUP \
-  --yes \
-  --no-wait
+  --name $RESOURCE_GROUP \  # `Resource group name`
+  --yes \                   # `Skip confirmation`
+  --no-wait                 # `Don't wait for completion`
 ```
 
 Clean up local files:
 ```bash
 cd ..
-rm -rf $APP_NAME $CHART_NAME helm-repo rendered-manifests.yaml
+rm -rf $APP_NAME $CHART_NAME helm-repo rendered-manifests.yaml  # `Remove local artifacts`
 ```
 
 ---
