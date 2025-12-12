@@ -1,4 +1,5 @@
 # Lab 6d: Real-Time ML Inference Pipeline
+<img width="1488" height="608" alt="IMG" src="https://github.com/user-attachments/assets/fdfbf5a1-72ae-4cf9-bf15-db0ab3e0d364" />
 
 ## Objective
 Build a real-time ML inference pipeline on AKS using Event Hubs (Kafka-compatible), Redis caching, and streaming frameworks. Deploy scalable inference services with monitoring, auto-scaling, and resilience patterns.
