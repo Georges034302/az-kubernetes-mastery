@@ -1,4 +1,5 @@
 # Lab 4b: Prometheus & Grafana Monitoring
+<img width="800" height="407" alt="ZIMAGE" src="https://github.com/user-attachments/assets/99f0cc7f-af51-40f8-a483-d952966980f1" />
 
 ## Objective
 Deploy **Prometheus** and **Grafana** using the **kube-prometheus-stack** Helm chart to collect, store, and visualize AKS cluster metrics, create custom dashboards, and configure alerting rules.
