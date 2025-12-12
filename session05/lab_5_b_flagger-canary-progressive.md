@@ -246,13 +246,11 @@ Verify deployment:
 ```bash
 kubectl get pods --namespace $CANARY_NS  # `List application pods`
 kubectl get svc --namespace $CANARY_NS   # `Show services`
-
-# Verify deployment
-kubectl get pods -n canary-demo
-kubectl get svc -n canary-demo
 ```
 
-### 4. Create Canary Resource
+---
+
+## Step 7: Create Canary Resource
 Create `podinfo-canary.yaml`:
 
 ```yaml
@@ -326,30 +324,36 @@ kubectl get canary -n canary-demo -w
 kubectl describe canary podinfo -n canary-demo
 ```
 
-### 5. Observe Canary Initialization
+## Step 8: Observe Canary Initialization
+
+Flagger automatically creates primary deployment:
 ```bash
-# Flagger will create primary deployment and service
-kubectl get deployments -n canary-demo
-
-# You should see:
-# - podinfo (original)
-# - podinfo-primary (stable version)
-# - podinfo-canary will be created during rollout
-
-# Check services
-kubectl get svc -n canary-demo
+kubectl get deployments --namespace $CANARY_NS  # `Show all deployments`
 ```
 
-### 6. Trigger Canary Deployment
-Update the application to new version:
+You should see:
+- `podinfo` (original deployment)
+- `podinfo-primary` (stable version created by Flagger)
 
+Check services:
 ```bash
-kubectl set image deployment/podinfo \
-  podinfo=ghcr.io/stefanprodan/podinfo:6.3.1 \
-  -n canary-demo
+kubectl get svc --namespace $CANARY_NS  # `Show services`
 ```
 
-### 7. Monitor Canary Progression
+---
+
+## Step 9: Trigger Canary Deploymentment
+
+Update application to trigger canary rollout:
+```bash
+kubectl set image deployment/$APP_NAME \
+  $APP_NAME=ghcr.io/stefanprodan/podinfo:$PODINFO_NEW_VERSION \
+  --namespace $CANARY_NS  # `Update image to new version`
+```
+
+---
+
+## Step 10: Monitor Canary Progression
 ```bash
 # Watch canary status in real-time
 kubectl get canary -n canary-demo -w
