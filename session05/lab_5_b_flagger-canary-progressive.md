@@ -1,4 +1,5 @@
 # Lab 5b: Flagger Canary Progressive Delivery
+<img width="763" height="474" alt="ZIMAGE" src="https://github.com/user-attachments/assets/bd00a917-dbce-4e17-8f82-0dcb67a50523" />
 
 ## Objective
 Learn to implement automated, metrics-driven progressive delivery on AKS using Flagger for canary deployments with automated analysis and rollback.
