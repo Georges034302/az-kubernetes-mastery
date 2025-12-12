@@ -1,4 +1,5 @@
 # Lab 6b: Databricks Delta Lake on Kubernetes
+<img width="1024" height="670" alt="IMG" src="https://github.com/user-attachments/assets/15dcd875-c6af-4e30-80e8-eca31ca22c27" />
 
 ## Objective
 Deploy Azure Data Lake Storage Gen2 and configure Delta Lake from Databricks to run on AKS with Spark. Master ACID transactions, time travel queries, schema evolution, and data versioning for lakehouse architecture on Kubernetes.
