@@ -1,4 +1,5 @@
 # Lab 3d: Expose Workloads with LoadBalancer
+<img width="758" height="394" alt="ZIMAGE" src="https://github.com/user-attachments/assets/8d1dea62-6874-44ff-b8d3-4c3b54b89bfb" />
 
 ## Objective
 Expose Kubernetes workloads using **Azure Load Balancer** with public/static/internal IPs. Demonstrate traffic distribution, health probes, session affinity, IP restrictions, and Azure Load Balancer integration with AKS.
