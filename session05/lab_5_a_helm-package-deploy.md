@@ -1,91 +1,227 @@
 # Lab 5a: Helm Package and Deploy
 
 ## Objective
-Package and deploy applications using Helm charts.
+Create, package, and deploy a custom Helm chart to AKS with a containerized application using Azure Container Registry (ACR).
 
 ## Prerequisites
-- AKS cluster running
-- `kubectl` configured
-- Helm 3 installed
+- Azure CLI installed and authenticated
+- `kubectl` installed
+- Docker installed
 - Basic understanding of Kubernetes manifests
 
-## Steps
+---
 
-### 1. Install Helm
+## Lab Parameters
+
 ```bash
-# Check if Helm is already installed
-helm version
+# Resource and location settings
+RESOURCE_GROUP="rg-aks-helm-lab"
+LOCATION="australiaeast"  # Sydney, Australia
 
-# If not installed, install Helm
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+# AKS cluster settings
+CLUSTER_NAME="aks-helm-lab"
+NODE_COUNT=2
+NODE_SIZE="Standard_D2s_v3"
+K8S_VERSION="1.29"
 
-# Verify installation
+# Azure Container Registry settings
+ACR_NAME="acrhelm$RANDOM"
+
+# Application settings
+APP_NAME="myapp"
+APP_NAMESPACE="helm-demo"
+IMAGE_TAG="1.0.0"
+
+# Helm chart settings
+CHART_NAME="myapp"
+CHART_VERSION="1.0.0"
+RELEASE_NAME="myapp-release"
+```
+
+Display configuration:
+```bash
+echo "=== Lab 5a: Helm Package and Deploy ==="
+echo "Resource Group: $RESOURCE_GROUP"
+echo "Location: $LOCATION"
+echo "Cluster Name: $CLUSTER_NAME"
+echo "Node Count: $NODE_COUNT"
+echo "Node Size: $NODE_SIZE"
+echo "Kubernetes Version: $K8S_VERSION"
+echo "ACR Name: $ACR_NAME"
+echo "App Name: $APP_NAME"
+echo "Helm Chart: $CHART_NAME"
+echo "Release Name: $RELEASE_NAME"
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \              # `Resource group name`
+  --location $LOCATION                  # `Azure region`
+```
+
+---
+
+## Step 2: Create Azure Container Registry
+
+```bash
+az acr create \
+  --resource-group $RESOURCE_GROUP \    # `Resource group`
+  --name $ACR_NAME \                    # `ACR name (globally unique)`
+  --sku Standard \                      # `SKU tier`
+  --admin-enabled true                  # `Enable admin user`
+```
+
+Capture ACR login server:
+```bash
+ACR_LOGIN_SERVER=$(az acr show \
+  --name $ACR_NAME \
+  --query loginServer \
+  --output tsv)  # `Get ACR FQDN`
+
+echo "ACR Login Server: $ACR_LOGIN_SERVER"
+```
+
+---
+
+## Step 3: Create AKS Cluster
+
+```bash
+az aks create \
+  --resource-group $RESOURCE_GROUP \            # `Resource group`
+  --name $CLUSTER_NAME \                        # `Cluster name`
+  --location $LOCATION \                        # `Azure region`
+  --node-count $NODE_COUNT \                    # `Number of nodes`
+  --node-vm-size $NODE_SIZE \                   # `VM size for nodes`
+  --kubernetes-version $K8S_VERSION \           # `Kubernetes version`
+  --network-plugin azure \                      # `Azure CNI networking`
+  --enable-managed-identity \                   # `Use managed identity`
+  --attach-acr $ACR_NAME \                      # `Attach ACR for image pull`
+  --generate-ssh-keys                           # `Generate SSH keys`
+```
+
+Get credentials:
+```bash
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing
+```
+
+---
+
+## Step 4: Verify Helm Installation
+
+```bash
+if ! command -v helm &> /dev/null; then
+  echo "Installing Helm..."
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+else
+  echo "Helm already installed"
+fi
+
 helm version --short
 ```
 
-### 2. Add Helm Repositories
+---
+
+## Step 5: Build Application Container Image
+
+Create application directory:
 ```bash
-# Add official stable charts repository
-helm repo add stable https://charts.helm.sh/stable
-
-# Add Bitnami repository
-helm repo add bitnami https://charts.bitnami.com/bitnami
-
-# Add Azure Marketplace repository
-helm repo add azure-marketplace https://marketplace.azurecr.io/helm/v1/repo
-
-# Update repositories
-helm repo update
-
-# List all repositories
-helm repo list
+mkdir -p $APP_NAME
+cd $APP_NAME
 ```
 
-### 3. Search for Charts
+Create `app.py`:
 ```bash
-# Search for nginx charts
-helm search repo nginx
+cat <<'EOF' > app.py
+from flask import Flask, jsonify
+import os
+import socket
 
-# Search for specific version
-helm search repo nginx --version 13.2.0
+app = Flask(__name__)
 
-# Search in all repositories
-helm search hub wordpress
+@app.route("/")
+def home():
+    return jsonify({
+        "message": "Hello from MyApp via Helm!",
+        "hostname": socket.gethostname(),
+        "version": os.getenv("APP_VERSION", "1.0.0")
+    })
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "healthy"}), 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+EOF
 ```
 
-### 4. Install a Chart from Repository
+Create `Dockerfile`:
 ```bash
-# Install Redis
-helm install my-redis bitnami/redis \
-  --namespace default \
-  --create-namespace
+cat <<'EOF' > Dockerfile
+FROM python:3.11-slim
 
-# Check installation status
-helm status my-redis
+WORKDIR /app
 
-# List installed releases
-helm list
+COPY app.py .
 
-# Get values used in installation
-helm get values my-redis
+RUN pip install --no-cache-dir flask
+
+EXPOSE 5000
+
+ENV APP_VERSION=1.0.0
+
+CMD ["python", "app.py"]
+EOF
 ```
 
-### 5. Create Your Own Helm Chart
-```bash
-# Create a new chart
-helm create myapp
+---
 
-# Explore the chart structure
-tree myapp/
+## Step 6: Build and Push Image to ACR
+
+Login to ACR:
+```bash
+az acr login --name $ACR_NAME  # `Authenticate with ACR`
 ```
 
-Chart structure:
+Build Docker image:
+```bash
+docker build \
+  --tag $ACR_LOGIN_SERVER/$APP_NAME:$IMAGE_TAG \  # `Tag with ACR FQDN`
+  --file Dockerfile \                              # `Dockerfile path`
+  .                                                # `Build context`
+```
+
+Push image to ACR:
+```bash
+docker push $ACR_LOGIN_SERVER/$APP_NAME:$IMAGE_TAG  # `Push to ACR`
+
+echo "Image pushed: $ACR_LOGIN_SERVER/$APP_NAME:$IMAGE_TAG"
+```
+
+---
+
+## Step 7: Create Helm Chart
+
+Generate chart scaffold:
+```bash
+cd ..
+helm create $CHART_NAME  # `Create new Helm chart`
+```
+
+Helm chart structure:
 ```
 myapp/
 ├── Chart.yaml          # Chart metadata
 ├── values.yaml         # Default configuration values
-├── charts/             # Dependencies
-├── templates/          # Kubernetes manifests templates
+├── charts/             # Chart dependencies
+├── templates/          # Kubernetes manifest templates
 │   ├── deployment.yaml
 │   ├── service.yaml
 │   ├── ingress.yaml
@@ -95,85 +231,51 @@ myapp/
 └── .helmignore
 ```
 
-### 6. Customize Chart.yaml
-Edit `myapp/Chart.yaml`:
+---
 
-```yaml
+## Step 8: Customize Chart Metadata
+
+Update `$CHART_NAME/Chart.yaml`:
+```bash
+cat <<EOF > $CHART_NAME/Chart.yaml
 apiVersion: v2
-name: myapp
-description: A production-grade web application Helm chart
+name: $CHART_NAME
+description: Flask web application Helm chart for AKS
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
+version: $CHART_VERSION
+appVersion: "$IMAGE_TAG"
 keywords:
   - web
-  - nginx
-  - kubernetes
+  - flask
+  - python
 maintainers:
-  - name: Georges Bou Ghantous
-    email: your-email@example.com
-home: https://github.com/your-org/myapp
-sources:
-  - https://github.com/your-org/myapp
-dependencies: []
+  - name: AKS Admin
+home: https://github.com/your-org/$CHART_NAME
+EOF
 ```
 
-### 7. Configure values.yaml
-Edit `myapp/values.yaml`:
+---
 
-```yaml
+## Step 9: Configure Chart Values
+
+Update `$CHART_NAME/values.yaml`:
+```bash
+cat <<EOF > $CHART_NAME/values.yaml
 replicaCount: 3
 
 image:
-  repository: nginx
+  repository: $ACR_LOGIN_SERVER/$APP_NAME
   pullPolicy: IfNotPresent
-  tag: "1.25-alpine"
-
-imagePullSecrets: []
-nameOverride: ""
-fullnameOverride: ""
+  tag: "$IMAGE_TAG"
 
 serviceAccount:
   create: true
-  annotations: {}
   name: ""
-
-podAnnotations:
-  prometheus.io/scrape: "true"
-  prometheus.io/port: "9113"
-
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
-
-securityContext:
-  capabilities:
-    drop:
-    - ALL
-  readOnlyRootFilesystem: true
-  allowPrivilegeEscalation: false
 
 service:
   type: ClusterIP
   port: 80
-  targetPort: 80
-  annotations: {}
-
-ingress:
-  enabled: true
-  className: "nginx"
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-  hosts:
-    - host: myapp.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: myapp-tls
-      hosts:
-        - myapp.example.com
+  targetPort: 5000
 
 resources:
   limits:
@@ -184,534 +286,492 @@ resources:
     memory: 128Mi
 
 autoscaling:
-  enabled: true
-  minReplicas: 3
+  enabled: false
+  minReplicas: 2
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
-  targetMemoryUtilizationPercentage: 80
 
-nodeSelector: {}
-
-tolerations: []
-
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        podAffinityTerm:
-          labelSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values:
-                  - myapp
-          topologyKey: kubernetes.io/hostname
+ingress:
+  enabled: false
 
 livenessProbe:
   httpGet:
-    path: /healthz
-    port: http
+    path: /health
+    port: 5000
   initialDelaySeconds: 30
   periodSeconds: 10
 
 readinessProbe:
   httpGet:
-    path: /ready
-    port: http
+    path: /health
+    port: 5000
   initialDelaySeconds: 5
   periodSeconds: 5
-
-configMap:
-  enabled: true
-  data:
-    LOG_LEVEL: "info"
-    ENVIRONMENT: "production"
-
-secret:
-  enabled: true
-  data:
-    DATABASE_PASSWORD: "changeme"
-    API_KEY: "secret-key"
-```
-
-### 8. Create Custom Templates
-Create `myapp/templates/configmap.yaml`:
-
-```yaml
-{{- if .Values.configMap.enabled }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "myapp.fullname" . }}
-  labels:
-    {{- include "myapp.labels" . | nindent 4 }}
-data:
-  {{- range $key, $value := .Values.configMap.data }}
-  {{ $key }}: {{ $value | quote }}
-  {{- end }}
-{{- end }}
-```
-
-Create `myapp/templates/secret.yaml`:
-
-```yaml
-{{- if .Values.secret.enabled }}
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ include "myapp.fullname" . }}
-  labels:
-    {{- include "myapp.labels" . | nindent 4 }}
-type: Opaque
-data:
-  {{- range $key, $value := .Values.secret.data }}
-  {{ $key }}: {{ $value | b64enc | quote }}
-  {{- end }}
-{{- end }}
-```
-
-### 9. Update Deployment Template
-Edit `myapp/templates/deployment.yaml` to reference ConfigMap and Secret:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ include "myapp.fullname" . }}
-  labels:
-    {{- include "myapp.labels" . | nindent 4 }}
-spec:
-  {{- if not .Values.autoscaling.enabled }}
-  replicas: {{ .Values.replicaCount }}
-  {{- end }}
-  selector:
-    matchLabels:
-      {{- include "myapp.selectorLabels" . | nindent 6 }}
-  template:
-    metadata:
-      annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-      labels:
-        {{- include "myapp.selectorLabels" . | nindent 8 }}
-    spec:
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      serviceAccountName: {{ include "myapp.serviceAccountName" . }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      containers:
-      - name: {{ .Chart.Name }}
-        securityContext:
-          {{- toYaml .Values.securityContext | nindent 12 }}
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        ports:
-        - name: http
-          containerPort: {{ .Values.service.targetPort }}
-          protocol: TCP
-        envFrom:
-        {{- if .Values.configMap.enabled }}
-        - configMapRef:
-            name: {{ include "myapp.fullname" . }}
-        {{- end }}
-        {{- if .Values.secret.enabled }}
-        - secretRef:
-            name: {{ include "myapp.fullname" . }}
-        {{- end }}
-        livenessProbe:
-          {{- toYaml .Values.livenessProbe | nindent 12 }}
-        readinessProbe:
-          {{- toYaml .Values.readinessProbe | nindent 12 }}
-        resources:
-          {{- toYaml .Values.resources | nindent 12 }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-```
-
-### 10. Validate the Chart
-```bash
-# Lint the chart
-helm lint myapp/
-
-# Dry-run installation
-helm install myapp-test myapp/ --dry-run --debug
-
-# Template the chart to see generated manifests
-helm template myapp myapp/ > rendered.yaml
-
-# View specific template
-helm template myapp myapp/ --show-only templates/deployment.yaml
-```
-
-### 11. Package the Chart
-```bash
-# Package the chart
-helm package myapp/
-
-# This creates: myapp-1.0.0.tgz
-
-# Verify package contents
-tar -tzf myapp-1.0.0.tgz
-```
-
-### 12. Install the Chart
-```bash
-# Install with default values
-helm install myapp ./myapp
-
-# Install with custom values
-helm install myapp ./myapp \
-  --set replicaCount=5 \
-  --set image.tag=1.26-alpine
-
-# Install with values file
-cat > custom-values.yaml <<EOF
-replicaCount: 2
-image:
-  tag: "1.24-alpine"
-ingress:
-  enabled: false
-resources:
-  limits:
-    cpu: 500m
-    memory: 512Mi
 EOF
-
-helm install myapp-custom ./myapp -f custom-values.yaml
 ```
 
-### 13. Manage Chart Releases
+---
+
+## Step 10: Validate Helm Chart
+
+Lint the chart:
 ```bash
-# List all releases
-helm list
-
-# Get release status
-helm status myapp
-
-# Get release history
-helm history myapp
-
-# Get all values for a release
-helm get values myapp
-
-# Get generated manifests
-helm get manifest myapp
+helm lint $CHART_NAME  # `Check chart for issues`
 ```
 
-### 14. Upgrade a Release
+Render templates locally:
 ```bash
-# Upgrade with new values
-helm upgrade myapp ./myapp \
-  --set replicaCount=4 \
-  --set image.tag=1.26-alpine
+helm template $RELEASE_NAME $CHART_NAME \
+  --namespace $APP_NAMESPACE \
+  > rendered-manifests.yaml
 
-# Upgrade with reuse of values
-helm upgrade myapp ./myapp \
-  --reuse-values \
-  --set service.type=LoadBalancer
-
-# Upgrade and wait for completion
-helm upgrade myapp ./myapp --wait --timeout 5m
-
-# Force upgrade (recreate resources)
-helm upgrade myapp ./myapp --force
+echo "Rendered manifests saved to: rendered-manifests.yaml"
 ```
 
-### 15. Rollback a Release
+Dry-run installation:
 ```bash
-# View release history
-helm history myapp
-
-# Rollback to previous version
-helm rollback myapp
-
-# Rollback to specific revision
-helm rollback myapp 2
-
-# Rollback and wait
-helm rollback myapp --wait
+helm install $RELEASE_NAME $CHART_NAME \
+  --namespace $APP_NAMESPACE \
+  --create-namespace \
+  --dry-run \
+  --debug
 ```
 
-### 16. Add Chart Dependencies
-Edit `myapp/Chart.yaml`:
+---
 
+## Step 11: Install Helm Release
+
+Install the chart:
+```bash
+helm install $RELEASE_NAME $CHART_NAME \
+  --namespace $APP_NAMESPACE \          # `Target namespace`
+  --create-namespace \                  # `Create namespace if missing`
+  --wait \                              # `Wait for resources to be ready`
+  --timeout 5m                          # `Timeout duration`
+```
+
+Check release status:
+```bash
+helm status $RELEASE_NAME \
+  --namespace $APP_NAMESPACE
+```
+
+List releases:
+```bash
+helm list --namespace $APP_NAMESPACE
+```
+
+---
+
+## Step 12: Verify Application Deployment
+
+Check pods:
+```bash
+kubectl get pods --namespace $APP_NAMESPACE
+```
+
+Check service:
+```bash
+kubectl get service --namespace $APP_NAMESPACE
+```
+
+Test application:
+```bash
+kubectl port-forward \
+  --namespace $APP_NAMESPACE \
+  svc/$RELEASE_NAME-$CHART_NAME 8080:80
+```
+
+Open browser to `http://localhost:8080` or:
+```bash
+curl http://localhost:8080
+```
+
+---
+
+## Step 13: Upgrade Helm Release
+
+Upgrade with new replica count:
+```bash
+helm upgrade $RELEASE_NAME $CHART_NAME \
+  --namespace $APP_NAMESPACE \          # `Target namespace`
+  --set replicaCount=5 \                # `Override replica count`
+  --wait                                # `Wait for upgrade to complete`
+```
+
+View release history:
+```bash
+helm history $RELEASE_NAME --namespace $APP_NAMESPACE
+```
+
+---
+
+## Step 14: Rollback Helm Release
+
+Rollback to previous revision:
+```bash
+helm rollback $RELEASE_NAME \
+  --namespace $APP_NAMESPACE \          # `Target namespace`
+  --wait                                # `Wait for rollback to complete`
+```
+
+Rollback to specific revision:
+```bash
+helm rollback $RELEASE_NAME 1 \
+  --namespace $APP_NAMESPACE
+```
+
+---
+
+## Step 15: Package Helm Chart
+
+Package the chart:
+```bash
+helm package $CHART_NAME  # `Create .tgz archive`
+
+echo "Packaged chart:"
+ls -lh $CHART_NAME-$CHART_VERSION.tgz
+```
+
+---
+
+## Step 16: Create Helm Repository (Optional)
+
+Create local Helm repository:
+```bash
+mkdir -p helm-repo
+mv $CHART_NAME-$CHART_VERSION.tgz helm-repo/
+
+helm repo index helm-repo/ \
+  --url https://example.com/charts  # `Generate index.yaml`
+
+echo "Helm repository created at: helm-repo/"
+```
+
+---
+
+## Expected Results
+
+After completing this lab, you should have:
+
+- ✅ AKS cluster running in Australia East
+- ✅ Azure Container Registry with custom application image
+- ✅ Flask application containerized and pushed to ACR
+- ✅ Custom Helm chart created with proper structure
+- ✅ Chart validated with `helm lint`
+- ✅ Application deployed via Helm release
+- ✅ Release upgraded with new configuration
+- ✅ Release rolled back to previous version
+- ✅ Helm chart packaged as `.tgz` archive
+- ✅ Local Helm repository created
+
+---
+
+## Cleanup
+
+### Option 1: Delete Helm Release Only
+
+Uninstall Helm release:
+```bash
+helm uninstall $RELEASE_NAME --namespace $APP_NAMESPACE
+```
+
+Delete namespace:
+```bash
+kubectl delete namespace $APP_NAMESPACE
+```
+
+### Option 2: Delete All Azure Resources
+
+Delete resource group:
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait
+```
+
+Clean up local files:
+```bash
+cd ..
+rm -rf $APP_NAME $CHART_NAME helm-repo rendered-manifests.yaml
+```
+
+---
+
+
+## How This Connects to Kubernetes Package Management
+
+### Helm Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Helm Architecture                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐                                               │
+│  │  Helm CLI    │                                               │
+│  │  (Local)     │                                               │
+│  └──────┬───────┘                                               │
+│         │                                                        │
+│         │ helm install / upgrade / rollback                     │
+│         ▼                                                        │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │           Helm Chart Package (.tgz)                 │       │
+│  │  ┌──────────────────────────────────────────────┐  │       │
+│  │  │ Chart.yaml (metadata)                        │  │       │
+│  │  │ values.yaml (configuration)                  │  │       │
+│  │  │ templates/ (K8s manifests with {{ }} syntax)│  │       │
+│  │  │ charts/ (dependencies)                       │  │       │
+│  │  └──────────────────────────────────────────────┘  │       │
+│  └───────────────────┬─────────────────────────────────┘       │
+│                      │                                          │
+│                      │ Render templates with values             │
+│                      ▼                                          │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │          Generated Kubernetes Manifests             │       │
+│  │  (Deployment, Service, ConfigMap, Secret, etc.)     │       │
+│  └───────────────────┬─────────────────────────────────┘       │
+│                      │                                          │
+│                      │ kubectl apply                            │
+│                      ▼                                          │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │           Kubernetes API Server (AKS)               │       │
+│  │  ┌────────────────────────────────────────────┐    │       │
+│  │  │  Release: myapp-v1 (Revision 1)            │    │       │
+│  │  │  • Deployment: myapp (3 replicas)          │    │       │
+│  │  │  • Service: myapp-svc                      │    │       │
+│  │  │  • ConfigMap: myapp-config                 │    │       │
+│  │  └────────────────────────────────────────────┘    │       │
+│  └─────────────────────────────────────────────────────┘       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Helm Chart Structure Explained
+
+```
+myapp-chart/
+├── Chart.yaml          # Chart metadata (name, version, dependencies)
+├── values.yaml         # Default configuration values
+├── charts/             # Dependency charts (subcharts)
+├── templates/          # Kubernetes manifest templates
+│   ├── deployment.yaml # Deployment with {{ .Values.* }} placeholders
+│   ├── service.yaml    # Service template
+│   ├── _helpers.tpl    # Named template definitions (reusable)
+│   └── NOTES.txt       # Post-installation instructions
+└── .helmignore         # Files to exclude from package
+```
+
+### Helm Template Syntax Examples
+
+**Variable Substitution:**
 ```yaml
-dependencies:
-  - name: redis
-    version: "17.11.3"
-    repository: https://charts.bitnami.com/bitnami
-    condition: redis.enabled
-  - name: postgresql
-    version: "12.5.8"
-    repository: https://charts.bitnami.com/bitnami
-    condition: postgresql.enabled
+image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+replicas: {{ .Values.replicaCount }}
 ```
 
-Update `values.yaml`:
-
-```yaml
-redis:
-  enabled: true
-  auth:
-    enabled: true
-    password: "redispassword"
-  master:
-    persistence:
-      enabled: true
-      size: 8Gi
-
-postgresql:
-  enabled: true
-  auth:
-    username: myapp
-    password: "postgrespassword"
-    database: myappdb
-  primary:
-    persistence:
-      enabled: true
-      size: 10Gi
-```
-
-Download dependencies:
-```bash
-# Update dependencies
-helm dependency update myapp/
-
-# List dependencies
-helm dependency list myapp/
-
-# Build dependencies
-helm dependency build myapp/
-```
-
-### 17. Use Helm Hooks
-Create `myapp/templates/job-migrate.yaml`:
-
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {{ include "myapp.fullname" . }}-migrate
-  labels:
-    {{- include "myapp.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-upgrade,pre-install
-    "helm.sh/hook-weight": "-5"
-    "helm.sh/hook-delete-policy": before-hook-creation
-spec:
-  template:
-    metadata:
-      name: {{ include "myapp.fullname" . }}-migrate
-    spec:
-      restartPolicy: Never
-      containers:
-      - name: migrate
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        command:
-        - sh
-        - -c
-        - echo "Running database migrations..."
-```
-
-### 18. Create Helm Tests
-Create `myapp/templates/tests/test-connection.yaml`:
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: "{{ include "myapp.fullname" . }}-test-connection"
-  labels:
-    {{- include "myapp.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": test
-spec:
-  containers:
-  - name: wget
-    image: busybox
-    command: ['wget']
-    args: ['{{ include "myapp.fullname" . }}:{{ .Values.service.port }}']
-  restartPolicy: Never
-```
-
-Run tests:
-```bash
-# Run Helm tests
-helm test myapp
-
-# View test logs
-kubectl logs myapp-test-connection
-```
-
-### 19. Create a Helm Repository
-```bash
-# Create repository directory
-mkdir helm-repo
-
-# Copy packaged charts
-cp myapp-1.0.0.tgz helm-repo/
-
-# Generate index
-helm repo index helm-repo/ --url https://your-domain.com/charts
-
-# Upload to web server or Azure Blob Storage
-az storage blob upload-batch \
-  --account-name <storage-account> \
-  --destination charts \
-  --source helm-repo/
-
-# Add your repository
-helm repo add myrepo https://your-domain.com/charts
-helm repo update
-```
-
-### 20. Advanced Helm Features
-
-**Using Named Templates:**
-
-Edit `myapp/templates/_helpers.tpl`:
-
-```yaml
-{{/*
-Generate database URL
-*/}}
-{{- define "myapp.databaseURL" -}}
-{{- if .Values.postgresql.enabled -}}
-postgresql://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ include "myapp.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}
-{{- else -}}
-{{ .Values.externalDatabase.url }}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Generate Redis URL
-*/}}
-{{- define "myapp.redisURL" -}}
-{{- if .Values.redis.enabled -}}
-redis://:{{ .Values.redis.auth.password }}@{{ include "myapp.fullname" . }}-redis-master:6379
-{{- else -}}
-{{ .Values.externalRedis.url }}
-{{- end -}}
-{{- end -}}
-```
-
-**Using Values with Flow Control:**
-
+**Conditionals:**
 ```yaml
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
-metadata:
-  name: {{ include "myapp.fullname" . }}
-  {{- with .Values.ingress.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-spec:
-  {{- if .Values.ingress.className }}
-  ingressClassName: {{ .Values.ingress.className }}
-  {{- end }}
-  {{- if .Values.ingress.tls }}
-  tls:
-    {{- range .Values.ingress.tls }}
-    - hosts:
-        {{- range .hosts }}
-        - {{ . | quote }}
-        {{- end }}
-      secretName: {{ .secretName }}
-    {{- end }}
-  {{- end }}
-  rules:
-    {{- range .Values.ingress.hosts }}
-    - host: {{ .host | quote }}
-      http:
-        paths:
-          {{- range .paths }}
-          - path: {{ .path }}
-            pathType: {{ .pathType }}
-            backend:
-              service:
-                name: {{ include "myapp.fullname" $ }}
-                port:
-                  number: {{ $.Values.service.port }}
-          {{- end }}
-    {{- end }}
 {{- end }}
 ```
 
-**Uninstall Release:**
-```bash
-# Uninstall release
-helm uninstall myapp
-
-# Uninstall and keep history
-helm uninstall myapp --keep-history
-
-# Purge all data
-helm uninstall myapp --no-hooks
+**Loops:**
+```yaml
+{{- range $key, $value := .Values.configMap.data }}
+{{ $key }}: {{ $value | quote }}
+{{- end }}
 ```
 
-## Expected Results
-- Helm 3 installed and configured
-- Custom Helm chart created with proper structure
-- Chart packaged and validated
-- Application deployed using Helm
-- Dependencies managed automatically
-- Releases upgraded and rolled back successfully
-- Helm tests passing
-- Chart repository created and accessible
+**Named Templates:**
+```yaml
+{{- include "myapp.fullname" . }}  # Calls _helpers.tpl template
+```
 
-## Key Takeaways
-- **Helm** is a package manager for Kubernetes
-- **Charts** are reusable Kubernetes application packages
-- **Values** provide configuration flexibility
-- **Templates** use Go templating for dynamic manifests
-- **Releases** are installed instances of charts
-- **Repositories** host and distribute charts
-- **Hooks** enable lifecycle management (pre-install, post-upgrade, etc.)
-- **Dependencies** allow chart composition
-- `helm upgrade` enables rolling updates
-- `helm rollback` provides easy recovery
+### Helm Release Lifecycle
 
-## Helm Commands Quick Reference
+```
+┌──────────┐     helm install      ┌──────────┐
+│  Chart   │ ─────────────────────▶│ Release  │
+│ Package  │                        │ (Rev 1)  │
+└──────────┘                        └─────┬────┘
+                                          │
+                helm upgrade              │
+                (new values)              │
+                         │                │
+                         ▼                ▼
+                    ┌──────────┐     ┌──────────┐
+                    │ Release  │     │ Release  │
+                    │ (Rev 2)  │────▶│ (Rev 3)  │
+                    └─────┬────┘     └─────┬────┘
+                          │                │
+                          │ helm rollback  │
+                          └────────────────┘
+```
 
-| Command | Purpose |
-|---------|---------|
-| `helm install` | Install a chart |
-| `helm upgrade` | Upgrade a release |
-| `helm rollback` | Rollback to previous version |
-| `helm uninstall` | Remove a release |
-| `helm list` | List releases |
-| `helm status` | Show release status |
-| `helm get values` | Get release values |
-| `helm template` | Render templates locally |
-| `helm lint` | Validate chart |
-| `helm package` | Package chart |
-| `helm repo add` | Add repository |
-| `helm dependency` | Manage dependencies |
+### Helm vs kubectl Comparison
 
-## Troubleshooting
-- **Chart validation fails**: Run `helm lint` for detailed errors
-- **Template rendering errors**: Use `helm template --debug`
-- **Upgrade fails**: Check `helm history` and rollback if needed
-- **Dependencies not found**: Run `helm dependency update`
-- **Values not applied**: Verify with `helm get values`
+| Feature | kubectl | Helm |
+|---------|---------|------|
+| **Manifest Management** | Individual YAML files | Packaged charts |
+| **Configuration** | Hardcoded values | values.yaml + templating |
+| **Versioning** | Manual Git tags | Built-in chart versioning |
+| **Rollback** | Manual reapply | `helm rollback` (automated) |
+| **Dependencies** | Manual tracking | Defined in Chart.yaml |
+| **Release History** | No built-in tracking | `helm history` command |
+| **Package Distribution** | Git/URL download | Helm repositories |
+| **Templating** | Static YAML | Go template engine |
+
+### Chart Repository Concepts
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                 Helm Repository Structure                   │
+├────────────────────────────────────────────────────────────┤
+│                                                             │
+│  https://charts.example.com/                               │
+│  ├── index.yaml         (repository index)                 │
+│  ├── myapp-1.0.0.tgz    (chart package v1.0.0)            │
+│  ├── myapp-1.1.0.tgz    (chart package v1.1.0)            │
+│  └── otherapp-2.0.0.tgz (another chart)                    │
+│                                                             │
+│  index.yaml contains:                                       │
+│  apiVersion: v1                                            │
+│  entries:                                                   │
+│    myapp:                                                   │
+│      - name: myapp                                         │
+│        version: 1.1.0                                      │
+│        urls:                                               │
+│          - https://charts.example.com/myapp-1.1.0.tgz     │
+│                                                             │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Repository Workflow:**
+1. `helm repo add myrepo https://charts.example.com/`
+2. `helm repo update` (fetch latest index.yaml)
+3. `helm search repo myapp`
+4. `helm install release-name myrepo/myapp`
+
+### Key Helm Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Chart** | Package containing K8s templates + metadata + default values |
+| **Release** | Installed instance of a chart (has unique name + revision history) |
+| **Repository** | Collection of charts with index.yaml for discovery |
+| **Values** | Configuration parameters (values.yaml + --set overrides) |
+| **Template** | K8s manifest with Go template placeholders ({{ .Values.* }}) |
+| **Revision** | Each install/upgrade creates new revision (enables rollback) |
+| **Dependency** | Charts can depend on other charts (defined in Chart.yaml) |
+| **Hook** | Special resources executed at specific points (pre-install, post-upgrade) |
 
 ---
 
+## Key Takeaways
+
+- ✅ **Helm simplifies Kubernetes deployment** by packaging manifests, configuration, and dependencies into reusable charts
+- ✅ **Templating enables configuration flexibility** without modifying YAML files directly (values.yaml + --set flags)
+- ✅ **Release management provides versioning and rollback** capabilities crucial for production environments
+- ✅ **Chart repositories centralize distribution** similar to package managers (apt, yum, npm)
+- ✅ **Azure Container Registry stores custom images** referenced by Helm chart deployments
+- ✅ **Health probes in values.yaml** ensure Kubernetes monitors application readiness (/health endpoint)
+- ✅ **Helm lint validates charts** before deployment, catching template errors early
+- ✅ **helm upgrade --set overrides** enable dynamic configuration changes without editing values.yaml
+- ✅ **Revision history tracking** allows auditing and rollback to any previous release state
+- ✅ **Chart packaging (.tgz files)** standardizes distribution and versioning across teams
+
+---
+
+## Commands Quick Reference
+
+| Command | Purpose |
+|---------|---------|
+| `helm create <name>` | Generate new chart scaffold |
+| `helm lint <chart>` | Validate chart for issues |
+| `helm template <name> <chart>` | Render templates locally (dry-run) |
+| `helm install <name> <chart>` | Deploy chart as new release |
+| `helm upgrade <name> <chart>` | Update existing release |
+| `helm rollback <name> <revision>` | Revert to previous revision |
+| `helm uninstall <name>` | Delete release and resources |
+| `helm list` | Show all releases |
+| `helm history <name>` | View release revision history |
+| `helm get values <name>` | Show values used in release |
+| `helm package <chart>` | Create .tgz archive |
+| `helm repo index <dir>` | Generate repository index.yaml |
+| `helm repo add <name> <url>` | Add chart repository |
+| `helm search repo <keyword>` | Search repositories |
+
+---
+
+## Troubleshooting
+
+### Issue: Helm installation fails with "release already exists"
+
+**Solution:**
+```bash
+helm list --all-namespaces  # `Find existing release`
+helm uninstall $RELEASE_NAME --namespace $APP_NAMESPACE
+```
+
+### Issue: Pods not pulling image from ACR
+
+**Symptom:** `ErrImagePull` or `ImagePullBackOff`
+
+**Solution:**
+```bash
+# Verify ACR integration
+az aks check-acr \
+  --name $CLUSTER_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --acr $ACR_NAME
+
+# Reattach ACR if needed
+az aks update \
+  --name $CLUSTER_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --attach-acr $ACR_NAME
+```
+
+### Issue: Template rendering errors
+
+**Solution:**
+```bash
+# Debug template rendering
+helm template $RELEASE_NAME $CHART_NAME --debug
+
+# Check values
+helm get values $RELEASE_NAME --namespace $APP_NAMESPACE
+```
+
+### Issue: Rollback fails
+
+**Solution:**
+```bash
+# Check revision history
+helm history $RELEASE_NAME --namespace $APP_NAMESPACE
+
+# Force rollback
+helm rollback $RELEASE_NAME <revision> \
+  --namespace $APP_NAMESPACE \
+  --force
+```
+
+### Issue: Chart validation errors
+
+**Solution:**
+```bash
+# Lint with verbose output
+helm lint $CHART_NAME --debug
+
+# Check Chart.yaml syntax
+cat $CHART_NAME/Chart.yaml
+
+# Validate values.yaml
+helm template $CHART_NAME --validate
+```
+
+---
