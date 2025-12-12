@@ -1,64 +1,185 @@
 # Lab 6b: Databricks Delta Lake on Kubernetes
 
 ## Objective
-Use Delta Lake from Databricks with Kubernetes-based Spark for ACID transactions and data versioning.
+Deploy Azure Data Lake Storage Gen2 and configure Delta Lake from Databricks to run on AKS with Spark. Master ACID transactions, time travel queries, schema evolution, and data versioning for lakehouse architecture on Kubernetes.
 
-## Prerequisites
-- AKS cluster running
-- Azure Databricks workspace
-- Azure Data Lake Storage Gen2
-- Lab 6a completed (Spark on AKS setup)
-- `kubectl` configured
+---
 
-## Steps
+## Lab Parameters
 
-### 1. Set Up Azure Data Lake Storage Gen2
+Set these variables at the start:
+
 ```bash
-# Set variables
-RESOURCE_GROUP="aks-databricks-rg"
-STORAGE_ACCOUNT="aksdeltastorage$RANDOM"
-CONTAINER="delta-lake"
-LOCATION="eastus"
+# Azure Resources
+RESOURCE_GROUP="rg-aks-delta-lake"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-delta-cluster"
+NODE_COUNT=3
+NODE_SIZE="Standard_D8s_v3"
+K8S_VERSION="1.28"
 
-# Create storage account with hierarchical namespace
+# Storage Configuration
+STORAGE_ACCOUNT="deltastorage$RANDOM"
+CONTAINER="delta-lake"
+STORAGE_SKU="Standard_LRS"
+
+# Databricks Configuration
+DATABRICKS_WORKSPACE="databricks-delta-workspace"
+DATABRICKS_SKU="premium"
+
+# Spark & Delta Configuration
+SPARK_NAMESPACE="spark-jobs"
+SPARK_SA="spark"
+DELTA_VERSION="2.4.0"
+DELTA_PATH_PREFIX="delta/tables"
+
+# Managed Identity
+IDENTITY_NAME="delta-identity"
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \      # `Resource group name`
+  --location $LOCATION          # `Azure region (Sydney, Australia)`
+```
+
+---
+
+## Step 2: Create Azure Data Lake Storage Gen2
+
+```bash
 az storage account create \
+  --name $STORAGE_ACCOUNT \                # `Storage account name`
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --location $LOCATION \                   # `Region`
+  --sku $STORAGE_SKU \                     # `Storage SKU`
+  --kind StorageV2 \                       # `Storage V2 (supports ADLS Gen2)`
+  --hierarchical-namespace true            # `Enable hierarchical namespace for ADLS Gen2`
+
+az storage account wait \
   --name $STORAGE_ACCOUNT \
   --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard_LRS \
-  --kind StorageV2 \
-  --hierarchical-namespace true
+  --created                                # `Wait for storage account creation`
 
-# Create container
+echo "Storage account created: $STORAGE_ACCOUNT"
+```
+
+Create container:
+```bash
 az storage container create \
-  --name $CONTAINER \
-  --account-name $STORAGE_ACCOUNT \
-  --auth-mode login
+  --name $CONTAINER \                      # `Container name`
+  --account-name $STORAGE_ACCOUNT \        # `Storage account`
+  --auth-mode login                        # `Use Azure AD authentication`
 
-# Get storage account key
+echo "Container created: $CONTAINER"
+```
+
+Get storage account key:
+```bash
 STORAGE_KEY=$(az storage account keys list \
   --resource-group $RESOURCE_GROUP \
   --account-name $STORAGE_ACCOUNT \
-  --query '[0].value' -o tsv)
+  --query '[0].value' \
+  -o tsv)                                  # `Get primary key`
 
-echo "Storage Account: $STORAGE_ACCOUNT"
-echo "Container: $CONTAINER"
+echo "Storage key captured (length: ${#STORAGE_KEY} characters)"
 ```
 
-### 2. Configure Kubernetes Secret for Storage Access
+---
+
+## Step 3: Create AKS Cluster
+
 ```bash
-# Create secret with storage credentials
+az aks create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $CLUSTER_NAME \                   # `Cluster name`
+  --location $LOCATION \                   # `Region`
+  --node-count $NODE_COUNT \               # `Number of nodes`
+  --node-vm-size $NODE_SIZE \              # `VM size (8 vCPU, 32GB for Spark)`
+  --kubernetes-version $K8S_VERSION \      # `Kubernetes version`
+  --enable-managed-identity \              # `Use managed identity`
+  --generate-ssh-keys \                    # `Generate SSH keys`
+  --network-plugin azure \                 # `Azure CNI networking`
+  --no-wait                                # `Don't wait for completion`
+
+az aks wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --created                                # `Wait for cluster creation`
+
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing                     # `Configure kubectl`
+
+echo "AKS cluster created: $CLUSTER_NAME"
+```
+
+---
+
+## Step 4: Create Azure Databricks Workspace
+
+```bash
+az databricks workspace create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $DATABRICKS_WORKSPACE \           # `Workspace name`
+  --location $LOCATION \                   # `Region`
+  --sku $DATABRICKS_SKU                    # `SKU (premium for advanced features)`
+
+az databricks workspace wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $DATABRICKS_WORKSPACE \
+  --created                                # `Wait for workspace creation`
+
+DATABRICKS_URL=$(az databricks workspace show \
+  --resource-group $RESOURCE_GROUP \
+  --name $DATABRICKS_WORKSPACE \
+  --query workspaceUrl \
+  -o tsv)                                  # `Get workspace URL`
+
+echo "Databricks workspace created: $DATABRICKS_WORKSPACE"
+echo "Databricks URL: https://$DATABRICKS_URL"
+```
+
+---
+
+## Step 5: Configure Spark Namespace
+
+Create namespace:
+```bash
+kubectl create namespace $SPARK_NAMESPACE  # `Create namespace for Spark jobs`
+
+kubectl create serviceaccount $SPARK_SA \
+  --namespace $SPARK_NAMESPACE             # `Create service account for Spark`
+
+echo "Namespace and service account created"
+```
+
+---
+
+## Step 6: Configure Kubernetes Secret for Storage Access
+
+```bash
 kubectl create secret generic delta-storage-secret \
   --from-literal=account-name=$STORAGE_ACCOUNT \
   --from-literal=account-key=$STORAGE_KEY \
-  -n spark-jobs
+  --namespace $SPARK_NAMESPACE             # `Store storage credentials`
 
-# Verify secret
-kubectl get secret delta-storage-secret -n spark-jobs
+kubectl get secret delta-storage-secret \
+  --namespace $SPARK_NAMESPACE             # `Verify secret creation`
+
+echo "Storage credentials stored in Kubernetes secret"
 ```
 
-### 3. Create Databricks Cluster with Delta Lake
-In Databricks UI, create cluster with:
+---
+
+## Step 7: Create Databricks Cluster with Delta Lake
+
+**In Databricks UI, create cluster with:
 
 **Spark Config:**
 ```properties
@@ -347,19 +468,21 @@ changes_df = spark.read.format("delta") \
 changes_df.select("customer_id", "name", "_change_type", "_commit_version").show()
 ```
 
-### 13. Delta Lake on Kubernetes Job
-Create Kubernetes job that uses Delta Lake:
+---
 
-```yaml
+## Step 8: Run Delta Lake Job on Kubernetes
+
+Create Delta Lake processing job:
+```bash
+kubectl apply --namespace $SPARK_NAMESPACE -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: delta-processing-job
-  namespace: spark-jobs
 spec:
   template:
     spec:
-      serviceAccountName: spark
+      serviceAccountName: $SPARK_SA
       containers:
       - name: spark-delta
         image: apache/spark:3.4.1
@@ -368,7 +491,7 @@ spec:
         - --master
         - local[*]
         - --packages
-        - io.delta:delta-core_2.12:2.4.0
+        - io.delta:delta-core_2.12:$DELTA_VERSION
         - --conf
         - spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension
         - --conf
@@ -385,6 +508,8 @@ spec:
             secretKeyRef:
               name: delta-storage-secret
               key: account-key
+        - name: CONTAINER
+          value: "$CONTAINER"
         volumeMounts:
         - name: app-code
           mountPath: /app
@@ -394,10 +519,12 @@ spec:
           name: delta-job-code
       restartPolicy: Never
   backoffLimit: 3
+EOF
+
+echo "Delta processing job created"
 ```
 
-Create ConfigMap with job code:
-
+Create ConfigMap with Delta job code:
 ```bash
 cat > delta_job.py <<'EOF'
 from pyspark.sql import SparkSession
@@ -424,16 +551,32 @@ EOF
 
 kubectl create configmap delta-job-code \
   --from-file=delta_job.py \
-  -n spark-jobs
+  --namespace $SPARK_NAMESPACE  # `Create ConfigMap with Delta job code`
+
+rm delta_job.py  # `Remove local file`
+
+echo "ConfigMap 'delta-job-code' created"
 ```
 
-Run the job:
+Monitor the job:
 ```bash
-kubectl apply -f delta-processing-job.yaml
+kubectl get jobs \
+  --namespace $SPARK_NAMESPACE \
+  --watch  # `Watch job status`
+```
 
-# Monitor job
-kubectl get jobs -n spark-jobs -w
-kubectl logs -f job/delta-processing-job -n spark-jobs
+View job logs:
+```bash
+DELTA_JOB_POD=$(kubectl get pods \
+  --namespace $SPARK_NAMESPACE \
+  -l job-name=delta-processing-job \
+  -o jsonpath='{.items[0].metadata.name}')  # `Get job pod name`
+
+kubectl logs \
+  --namespace $SPARK_NAMESPACE \
+  --follow $DELTA_JOB_POD  # `Follow job logs`
+
+echo "Delta job pod: $DELTA_JOB_POD"
 ```
 
 ### 14. Delta Lake Table Constraints
@@ -562,25 +705,45 @@ delta_table.optimize().executeCompaction()
 spark.sql(f"ANALYZE TABLE delta.`{delta_table_path}` COMPUTE STATISTICS")
 ```
 
-### 20. Cleanup
+---
+
+## Cleanup
+
+**Option 1** - Remove Kubernetes resources only:
 ```bash
-# Delete Delta tables in storage
+kubectl delete configmap delta-job-code \
+  --namespace $SPARK_NAMESPACE  # `Delete job code ConfigMap`
+
+kubectl delete secret delta-storage-secret \
+  --namespace $SPARK_NAMESPACE  # `Delete storage credentials`
+
+kubectl delete job delta-processing-job \
+  --namespace $SPARK_NAMESPACE  # `Delete Delta processing job`
+
+kubectl delete namespace $SPARK_NAMESPACE  # `Delete namespace`
+
+echo "Kubernetes resources removed"
+```
+
+**Option 2** - Delete Delta Lake data:
+```bash
 az storage blob delete-batch \
   --account-name $STORAGE_ACCOUNT \
   --source $CONTAINER \
-  --pattern "delta/*" \
-  --auth-mode login
+  --pattern "$DELTA_PATH_PREFIX/*" \
+  --auth-mode login  # `Delete all Delta tables`
 
-# Delete Kubernetes resources
-kubectl delete configmap delta-job-code -n spark-jobs
-kubectl delete secret delta-storage-secret -n spark-jobs
-kubectl delete job delta-processing-job -n spark-jobs
+echo "Delta Lake data deleted"
+```
 
-# Delete storage account (optional)
-# az storage account delete \
-#   --name $STORAGE_ACCOUNT \
-#   --resource-group $RESOURCE_GROUP \
-#   --yes
+**Option 3** - Delete entire resource group:
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait  # `Delete RG (includes AKS, Databricks, storage)`
+
+echo "Resource group deletion initiated"
 ```
 
 ## Expected Results
