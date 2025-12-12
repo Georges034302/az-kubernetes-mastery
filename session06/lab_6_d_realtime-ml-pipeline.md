@@ -1,96 +1,238 @@
 # Lab 6d: Real-Time ML Inference Pipeline
 
 ## Objective
-Build a real-time ML inference pipeline on AKS using Databricks, Kafka, and streaming frameworks.
+Build a real-time ML inference pipeline on AKS using Event Hubs (Kafka-compatible), Redis caching, and streaming frameworks. Deploy scalable inference services with monitoring, auto-scaling, and resilience patterns.
 
-## Prerequisites
-- AKS cluster running
-- Azure Databricks workspace
-- Azure Event Hubs (Kafka-compatible)
-- MLflow model from Lab 6c
-- `kubectl` configured
+---
 
-## Steps
+## Lab Parameters
 
-### 1. Create Azure Event Hubs Namespace
+Set these variables at the start:
+
 ```bash
-# Set variables
-RESOURCE_GROUP="aks-databricks-rg"
-EVENTHUB_NAMESPACE="aks-ml-events$RANDOM"
-EVENTHUB_NAME="inference-requests"
-LOCATION="eastus"
+# Azure Resources
+RESOURCE_GROUP="rg-aks-ml-pipeline"
+LOCATION="australiaeast"
+CLUSTER_NAME="aks-inference-cluster"
+NODE_COUNT=3
+NODE_SIZE="Standard_D4s_v3"
+K8S_VERSION="1.28"
 
-# Create Event Hubs namespace
+# Azure Container Registry
+ACR_NAME="mlpipelineacr$RANDOM"
+ACR_SKU="Standard"
+
+# Event Hubs Configuration
+EVENTHUB_NAMESPACE="evhns-ml-inference$RANDOM"
+EVENTHUB_NAME="inference-requests"
+EVENTHUB_RESULTS="inference-results"
+EVENTHUB_SKU="Standard"
+EVENTHUB_PARTITIONS=4
+CONSUMER_GROUP="inference-consumer"
+
+# MLflow Configuration  
+MLFLOW_NAMESPACE="mlflow"
+MODEL_NAME="diabetes-rf-model"
+MODEL_STAGE="Production"
+
+# Inference Service
+INFERENCE_NAMESPACE="inference"
+INFERENCE_REPLICAS=3
+```
+
+---
+
+## Step 1: Create Resource Group
+
+```bash
+az group create \
+  --name $RESOURCE_GROUP \      # `Resource group name`
+  --location $LOCATION          # `Azure region (Sydney, Australia)`
+```
+
+---
+
+## Step 2: Create Azure Container Registry
+
+```bash
+az acr create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $ACR_NAME \                       # `ACR name`
+  --sku $ACR_SKU \                         # `SKU tier`
+  --location $LOCATION \                   # `Region`
+  --admin-enabled true                     # `Enable admin account`
+
+ACR_USERNAME=$(az acr credential show \
+  --name $ACR_NAME \
+  --query username \
+  -o tsv)                                  # `Get ACR username`
+
+ACR_PASSWORD=$(az acr credential show \
+  --name $ACR_NAME \
+  --query passwords[0].value \
+  -o tsv)                                  # `Get ACR password`
+
+ACR_SERVER="${ACR_NAME}.azurecr.io"        # `Construct ACR server URL`
+
+echo "ACR created: $ACR_NAME"
+echo "ACR Server: $ACR_SERVER"
+```
+
+---
+
+## Step 3: Create AKS Cluster
+
+```bash
+az aks create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $CLUSTER_NAME \                   # `Cluster name`
+  --location $LOCATION \                   # `Region`
+  --node-count $NODE_COUNT \               # `Number of nodes`
+  --node-vm-size $NODE_SIZE \              # `VM size (4 vCPU, 16GB for ML)`
+  --kubernetes-version $K8S_VERSION \      # `Kubernetes version`
+  --enable-managed-identity \              # `Use managed identity`
+  --generate-ssh-keys \                    # `Generate SSH keys`
+  --network-plugin azure \                 # `Azure CNI networking`
+  --attach-acr $ACR_NAME \                 # `Attach ACR for image pull`
+  --no-wait                                # `Don't wait for completion`
+
+az aks wait \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --created                                # `Wait for cluster creation`
+
+az aks get-credentials \
+  --resource-group $RESOURCE_GROUP \
+  --name $CLUSTER_NAME \
+  --overwrite-existing                     # `Get cluster credentials`
+
+echo "AKS cluster created: $CLUSTER_NAME"
+```
+
+---
+
+## Step 4: Create Azure Event Hubs Namespace
+
+```bash
 az eventhubs namespace create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --name $EVENTHUB_NAMESPACE \             # `Event Hubs namespace`
+  --location $LOCATION \                   # `Region`
+  --sku $EVENTHUB_SKU \                    # `SKU (Standard for Kafka)`
+  --enable-kafka true                      # `Enable Kafka protocol`
+
+az eventhubs namespace wait \
   --resource-group $RESOURCE_GROUP \
   --name $EVENTHUB_NAMESPACE \
-  --location $LOCATION \
-  --sku Standard
+  --created                                # `Wait for namespace creation`
 
-# Create Event Hub
+echo "Event Hubs namespace created: $EVENTHUB_NAMESPACE"
+```
+
+---
+
+## Step 5: Create Event Hubs
+
+Create Event Hub for requests:
+```bash
 az eventhubs eventhub create \
-  --resource-group $RESOURCE_GROUP \
-  --namespace-name $EVENTHUB_NAMESPACE \
-  --name $EVENTHUB_NAME \
-  --partition-count 4 \
-  --message-retention 1
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --namespace-name $EVENTHUB_NAMESPACE \   # `Namespace`
+  --name $EVENTHUB_NAME \                  # `Event Hub name for requests`
+  --partition-count $EVENTHUB_PARTITIONS \ # `Number of partitions`
+  --message-retention 1                    # `Retention in days`
 
-# Create consumer group
+echo "Event Hub created for requests: $EVENTHUB_NAME"
+```
+
+Create Event Hub for results:
+```bash
+az eventhubs eventhub create \
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --namespace-name $EVENTHUB_NAMESPACE \   # `Namespace`
+  --name $EVENTHUB_RESULTS \               # `Event Hub name for results`
+  --partition-count $EVENTHUB_PARTITIONS \ # `Number of partitions`
+  --message-retention 1                    # `Retention in days`
+
+echo "Event Hub created for results: $EVENTHUB_RESULTS"
+```
+
+Create consumer group:
+```bash
 az eventhubs eventhub consumer-group create \
-  --resource-group $RESOURCE_GROUP \
-  --namespace-name $EVENTHUB_NAMESPACE \
-  --eventhub-name $EVENTHUB_NAME \
-  --name inference-consumer
+  --resource-group $RESOURCE_GROUP \       # `Resource group`
+  --namespace-name $EVENTHUB_NAMESPACE \   # `Namespace`
+  --eventhub-name $EVENTHUB_NAME \         # `Event Hub name`
+  --name $CONSUMER_GROUP                   # `Consumer group name`
 
-# Get connection string
+echo "Consumer group created: $CONSUMER_GROUP"
+```
+
+Get connection string:
+```bash
 EVENTHUB_CONNECTION=$(az eventhubs namespace authorization-rule keys list \
   --resource-group $RESOURCE_GROUP \
   --namespace-name $EVENTHUB_NAMESPACE \
   --name RootManageSharedAccessKey \
-  --query primaryConnectionString -o tsv)
+  --query primaryConnectionString \
+  -o tsv)                                  # `Get connection string`
 
-echo "Event Hub Connection String saved"
+echo "Event Hubs connection string retrieved (${#EVENTHUB_CONNECTION} chars)"
 ```
 
-### 2. Deploy Kafka (Alternative to Event Hubs)
-For on-premise Kafka on AKS:
+---
 
+## Step 6: Deploy Redis Cache
+
+Install Redis for prediction caching:
 ```bash
-# Add Bitnami repo
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
+helm repo add bitnami https://charts.bitnami.com/bitnami  # `Add Bitnami Helm repo`
+helm repo update                                           # `Update Helm repos`
 
-# Install Kafka
-kubectl create namespace kafka
+kubectl create namespace $INFERENCE_NAMESPACE              # `Create inference namespace`
 
-helm install kafka bitnami/kafka \
-  --namespace kafka \
-  --set replicaCount=3 \
-  --set auth.clientProtocol=plaintext \
-  --set persistence.size=20Gi
+helm install redis bitnami/redis \
+  --namespace $INFERENCE_NAMESPACE \                       # `Namespace`
+  --set auth.enabled=false \                               # `Disable auth for simplicity`
+  --set master.persistence.size=10Gi \                     # `Storage size`
+  --set replica.replicaCount=2                             # `Number of replicas`
 
-# Wait for Kafka to be ready
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=kafka -n kafka --timeout=300s
+kubectl wait \
+  --for=condition=ready pod \
+  -l app.kubernetes.io/name=redis \
+  --namespace $INFERENCE_NAMESPACE \
+  --timeout=300s                                           # `Wait for Redis to be ready`
 
-# Get Kafka connection details
-export KAFKA_BROKER=$(kubectl get svc kafka -n kafka -o jsonpath='{.spec.clusterIP}'):9092
-echo "Kafka Broker: $KAFKA_BROKER"
+REDIS_HOST=$(kubectl get svc redis-master \
+  --namespace $INFERENCE_NAMESPACE \
+  -o jsonpath='{.spec.clusterIP}')                         # `Get Redis internal IP`
+
+echo "Redis deployed"
+echo "Redis Host: $REDIS_HOST"
 ```
 
-### 3. Create Kubernetes Secret for Event Hub
+---
+
+## Step 7: Create Kubernetes Secrets
+
+Create secrets for Event Hubs:
 ```bash
-# Create secret with Event Hub connection
 kubectl create secret generic eventhub-secret \
   --from-literal=connection-string="$EVENTHUB_CONNECTION" \
-  -n mlflow
+  --namespace $INFERENCE_NAMESPACE                         # `Event Hub connection secret`
 
-# For Kafka
-kubectl create secret generic kafka-secret \
-  --from-literal=broker="$KAFKA_BROKER" \
-  -n mlflow
+kubectl create secret generic redis-config \
+  --from-literal=host="$REDIS_HOST" \
+  --from-literal=port="6379" \
+  --namespace $INFERENCE_NAMESPACE                         # `Redis configuration secret`
+
+echo "Secrets created in namespace: $INFERENCE_NAMESPACE"
 ```
 
-### 4. Deploy Real-Time Inference Service
+---
+
+## Step 8: Create Real-Time Inference Service
+
 Create `inference-service.py`:
 
 ```python
@@ -237,15 +379,17 @@ if __name__ == "__main__":
     service.run()
 ```
 
-### 5. Build and Deploy Inference Service
-Create Dockerfile:
+---
 
+## Step 9: Build and Deploy Inference Service
+
+Create Dockerfile:
 ```dockerfile
 FROM python:3.9-slim
 
 # Install dependencies
 RUN pip install mlflow==2.9.0 scikit-learn pandas numpy \
-    azure-eventhub kafka-python
+    azure-eventhub redis prometheus-client
 
 # Copy service code
 COPY inference-service.py /app/
@@ -255,26 +399,29 @@ WORKDIR /app
 CMD ["python", "inference-service.py"]
 ```
 
-Build and push:
+Build and push image:
 ```bash
-ACR_NAME="<your-acr-name>"
-ACR_SERVER="${ACR_NAME}.azurecr.io"
+docker build \
+  -t ${ACR_SERVER}/inference-service:v1 \
+  .                                        # `Build Docker image`
 
-docker build -t ${ACR_SERVER}/inference-service:v1 .
-az acr login --name $ACR_NAME
-docker push ${ACR_SERVER}/inference-service:v1
+az acr login \
+  --name $ACR_NAME                         # `Login to ACR`
+
+docker push ${ACR_SERVER}/inference-service:v1  # `Push image to ACR`
+
+echo "Inference service image pushed to ACR"
 ```
 
-Deploy to Kubernetes:
-
-```yaml
+Deploy inference service to Kubernetes:
+```bash
+kubectl apply --namespace $INFERENCE_NAMESPACE -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: inference-service
-  namespace: mlflow
 spec:
-  replicas: 3
+  replicas: $INFERENCE_REPLICAS
   selector:
     matchLabels:
       app: inference-service
@@ -282,17 +429,20 @@ spec:
     metadata:
       labels:
         app: inference-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
     spec:
       containers:
       - name: inference
-        image: <ACR_SERVER>/inference-service:v1
+        image: ${ACR_SERVER}/inference-service:v1
         env:
         - name: MLFLOW_TRACKING_URI
-          value: http://mlflow-server.mlflow:5000
+          value: http://mlflow-server.$MLFLOW_NAMESPACE:5000
         - name: MODEL_NAME
-          value: diabetes-rf-model
+          value: $MODEL_NAME
         - name: MODEL_STAGE
-          value: Production
+          value: $MODEL_STAGE
         - name: USE_EVENTHUB
           value: "true"
         - name: EVENTHUB_CONNECTION
@@ -301,9 +451,24 @@ spec:
               name: eventhub-secret
               key: connection-string
         - name: EVENTHUB_NAME
-          value: inference-requests
+          value: $EVENTHUB_NAME
+        - name: EVENTHUB_RESULTS
+          value: $EVENTHUB_RESULTS
         - name: CONSUMER_GROUP
-          value: inference-consumer
+          value: $CONSUMER_GROUP
+        - name: REDIS_HOST
+          valueFrom:
+            secretKeyRef:
+              name: redis-config
+              key: host
+        - name: REDIS_PORT
+          valueFrom:
+            secretKeyRef:
+              name: redis-config
+              key: port
+        ports:
+        - containerPort: 8000
+          name: metrics
         resources:
           requests:
             cpu: 500m
@@ -311,19 +476,34 @@ spec:
           limits:
             cpu: 1000m
             memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-service
+spec:
+  selector:
+    app: inference-service
+  ports:
+  - name: metrics
+    port: 8000
+    targetPort: 8000
+EOF
+
+kubectl wait \
+  --for=condition=ready pod \
+  -l app=inference-service \
+  --namespace $INFERENCE_NAMESPACE \
+  --timeout=300s                           # `Wait for inference service`
+
+echo "Inference service deployed with $INFERENCE_REPLICAS replicas"
 ```
 
-Deploy:
-```bash
-kubectl apply -f inference-service-deployment.yaml
+---
 
-# Verify deployment
-kubectl get pods -n mlflow -l app=inference-service
-kubectl logs -f deployment/inference-service -n mlflow
-```
+## Step 10: Create Request Producer in Databricks
 
-### 6. Create Request Producer in Databricks
-Create Databricks notebook:
+Create a Databricks notebook to send inference requests:
 
 ```python
 from azure.eventhub import EventHubProducerClient, EventData
@@ -365,7 +545,9 @@ with producer:
 print("Finished sending requests")
 ```
 
-### 7. Consume Results in Databricks
+---
+
+## Step 11: Consume Results in Databricks
 ```python
 from azure.eventhub import EventHubConsumerClient
 
@@ -390,8 +572,11 @@ with consumer:
     )
 ```
 
-### 8. Implement Batch Inference with Spark Streaming
-Create Spark Structured Streaming job:
+---
+
+## Step 12: Implement Batch Inference with Spark Streaming
+
+Create a Spark Structured Streaming job in Databricks:
 
 ```python
 from pyspark.sql import SparkSession
@@ -487,7 +672,11 @@ def monitored_predict(features):
 start_http_server(8000)
 ```
 
-### 10. Implement Model Versioning in Pipeline
+---
+
+## Additional Implementation Patterns
+
+### Model Versioning in Pipeline
 ```python
 class VersionedInferenceService:
     def __init__(self):
@@ -516,7 +705,7 @@ class VersionedInferenceService:
         return self.models[version].predict(features)
 ```
 
-### 11. Add Feature Preprocessing Pipeline
+### Feature Preprocessing Pipeline
 ```python
 from sklearn.preprocessing import StandardScaler
 import joblib
@@ -553,18 +742,9 @@ class PreprocessingPipeline:
             raise ValueError("Features contain infinite values")
 ```
 
-### 12. Implement Caching Layer with Redis
-Deploy Redis:
+### Caching Layer Implementation
 
-```bash
-helm install redis bitnami/redis \
-  --namespace mlflow \
-  --set auth.enabled=false
-
-export REDIS_HOST=$(kubectl get svc redis-master -n mlflow -o jsonpath='{.spec.clusterIP}')
-```
-
-Add caching to inference service:
+Redis caching is already deployed in Step 6. Add this caching logic to inference service:
 
 ```python
 import redis
@@ -608,7 +788,7 @@ class CachedInferenceService:
         return prediction
 ```
 
-### 13. Add Request Queue with Priority
+### Request Queue with Priority
 ```python
 import heapq
 from dataclasses import dataclass, field
@@ -644,7 +824,7 @@ class PriorityInferenceQueue:
         return item.request
 ```
 
-### 14. Implement Circuit Breaker Pattern
+### Circuit Breaker Pattern
 ```python
 from datetime import datetime, timedelta
 
@@ -687,13 +867,17 @@ class CircuitBreaker:
             logger.error("Circuit breaker opened")
 ```
 
-### 15. Create Horizontal Pod Autoscaler
-```yaml
+---
+
+## Step 13: Configure Horizontal Pod Autoscaler
+
+Create HPA for auto-scaling:
+```bash
+kubectl apply --namespace $INFERENCE_NAMESPACE -f - <<EOF
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: inference-service-hpa
-  namespace: mlflow
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -714,16 +898,9 @@ spec:
       target:
         type: Utilization
         averageUtilization: 80
-  - type: Pods
-    pods:
-      metric:
-        name: kafka_consumer_lag
-      target:
-        type: AverageValue
-        averageValue: "100"
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 300  # 5 minutes stabilization
       policies:
       - type: Percent
         value: 50
@@ -738,17 +915,23 @@ spec:
         value: 4
         periodSeconds: 15
       selectPolicy: Max
+EOF
+
+echo "HPA configured: 3-20 replicas based on CPU (70%) and Memory (80%)"
 ```
 
-### 16. Monitor with Grafana Dashboard
-Create Prometheus ServiceMonitor:
+---
 
-```yaml
+## Step 14: Monitor with Prometheus ServiceMonitor
+
+Create Prometheus ServiceMonitor for metrics collection:
+
+```bash
+kubectl apply --namespace $INFERENCE_NAMESPACE -f - <<EOF
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: inference-service-metrics
-  namespace: mlflow
 spec:
   selector:
     matchLabels:
@@ -756,12 +939,27 @@ spec:
   endpoints:
   - port: metrics
     interval: 30s
+    path: /metrics
+EOF
+
+echo "ServiceMonitor created for Prometheus scraping"
 ```
 
-Import Grafana dashboard for inference metrics.
+View metrics:
+```bash
+kubectl port-forward \
+  --namespace $INFERENCE_NAMESPACE \
+  --address 0.0.0.0 \
+  svc/inference-service 8000:8000 &       # `Port-forward metrics endpoint`
 
-### 17. Load Testing
-Create load test script:
+echo "Metrics available at: http://localhost:8000/metrics"
+```
+
+---
+
+## Step 15: Load Testing
+
+Create load test script in Databricks:
 
 ```python
 import concurrent.futures
@@ -811,28 +1009,45 @@ def load_test(num_requests=10000, num_workers=50):
 load_test(num_requests=10000, num_workers=100)
 ```
 
-### 18. Cleanup
+---
+
+## Cleanup
+
+### Option 1: Delete Inference Resources Only
 ```bash
-# Delete deployments
-kubectl delete deployment inference-service -n mlflow
-kubectl delete hpa inference-service-hpa -n mlflow
+kubectl delete namespace $INFERENCE_NAMESPACE  # `Delete inference namespace and all resources`
 
-# Delete Event Hub
-az eventhubs eventhub delete \
-  --resource-group $RESOURCE_GROUP \
-  --namespace-name $EVENTHUB_NAMESPACE \
-  --name $EVENTHUB_NAME
+echo "Inference resources deleted"
+```
 
+### Option 2: Delete Event Hubs
+```bash
 az eventhubs namespace delete \
   --resource-group $RESOURCE_GROUP \
-  --name $EVENTHUB_NAMESPACE
+  --name $EVENTHUB_NAMESPACE \
+  --yes                                        # `Delete Event Hubs namespace`
 
-# Delete Kafka
-helm uninstall kafka -n kafka
-kubectl delete namespace kafka
+echo "Event Hubs namespace deleted"
+```
 
-# Delete Redis
-helm uninstall redis -n mlflow
+### Option 3: Delete ACR Images
+```bash
+az acr repository delete \
+  --name $ACR_NAME \
+  --repository inference-service \
+  --yes                                        # `Delete inference service image`
+
+echo "ACR images deleted"
+```
+
+### Option 4: Delete All Azure Resources
+```bash
+az group delete \
+  --name $RESOURCE_GROUP \
+  --yes \
+  --no-wait                                    # `Delete entire resource group`
+
+echo "Resource group deletion initiated: $RESOURCE_GROUP"
 ```
 
 ## Expected Results
