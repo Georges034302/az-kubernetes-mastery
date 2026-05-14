@@ -157,6 +157,6 @@ Integrate ML workflows end-to-end—from Databricks notebooks and MLflow trackin
 
 ---
 
-# 🧑‍🏫 Author: Georges Bou Ghantous, Ph.D.
-
-This repository delivers advanced AKS training through hands-on labs spanning cluster scaling, governance, pod security, networking, observability, deployment automation, service mesh, and ML/Databricks integration.
+<sub><i><span style="color:#B0B0B0">
+🧑‍🏫 Author: Georges Bou Ghantous, Ph.D.
+</span></i></sub>
