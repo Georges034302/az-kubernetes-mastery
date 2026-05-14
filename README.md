@@ -157,6 +157,4 @@ Integrate ML workflows end-to-end—from Databricks notebooks and MLflow trackin
 
 ---
 
-<sub><i><span style="color:#B0B0B0">
-🧑‍🏫 Author: Georges Bou Ghantous, Ph.D.
-</span></i></sub>
+<sub><i><span style="color:#B0B0B0">👤 Author: Dr. Georges Bou Ghantous</span></i></sub>
